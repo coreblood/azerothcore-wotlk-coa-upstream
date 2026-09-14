@@ -508,7 +508,21 @@ void ApplyContracts(SpellInfo* info)
                     effect.TargetA = SpellImplicitTargetInfo(heal ? TARGET_UNIT_TARGET_ALLY : TARGET_UNIT_TARGET_ENEMY);
                     effect.TargetB = SpellImplicitTargetInfo();
                 }
+            // Contracts run after the core caches this mask; keep the explicit recipient of copied effects.
+            info->_InitializeExplicitTargetMask();
         }
+    if (id == JungleSecretsHeal)
+    {
+        // A share of the effective Brew heal, with one explicitly selected recipient per effigy.
+        info->DmgClass = SPELL_DAMAGE_CLASS_NONE;
+        info->AttributesEx2 |= SPELL_ATTR2_CANT_CRIT;
+        info->AttributesEx3 |= SPELL_ATTR3_IGNORE_CASTER_MODIFIERS;
+        info->AscensionInheritsResolvedAmount = true;
+        info->Effects[EFFECT_0].BonusMultiplier = 0.0f;
+        info->Effects[EFFECT_0].TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ALLY);
+        info->Effects[EFFECT_0].TargetB = SpellImplicitTargetInfo();
+        info->_InitializeExplicitTargetMask();
+    }
 }
 } // namespace AscensionWitchDoctor
 
