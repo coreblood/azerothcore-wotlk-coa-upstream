@@ -106,6 +106,11 @@
 //  see: https://github.com/azerothcore/azerothcore-wotlk/issues/9766
 #include "GridNotifiersImpl.h"
 
+enum CustomEquipmentSpells : uint32
+{
+    SPELL_BURNING_COMMANDER = 92089
+};
+
 enum CharacterFlags
 {
     CHARACTER_FLAG_NONE                 = 0x00000000,
@@ -2054,6 +2059,10 @@ void Player::Regenerate(Powers power)
 
 void Player::RegenerateHealth()
 {
+    // Copied Resynchronization records use POWER_HEALTH for the health regeneration lock.
+    if (HasAuraTypeWithMiscvalue(SPELL_AURA_PREVENT_REGENERATE_POWER, POWER_HEALTH))
+        return;
+
     uint32 curValue = GetHealth();
     uint32 maxValue = GetMaxHealth();
 
@@ -3675,6 +3684,9 @@ void Player::removeSpell(uint32 spell_id, uint8 removeSpecMask, bool onlyTempora
             }
         }
     }
+
+    if (spell_id == SPELL_BURNING_COMMANDER)
+        AutoUnequipOffhandIfNeed();
 
     // pussywizard: remove from spell book (can't be replaced by previous rank, because such spells can't be unlearnt)
     if (!onlyTemporary || ((!spellInfo->HasAttribute(SpellAttr0(SPELL_ATTR0_PASSIVE | SPELL_ATTR0_DO_NOT_DISPLAY)) || !spellInfo->HasAnyAura()) && !spellInfo->HasEffect(SPELL_EFFECT_LEARN_SPELL)))
@@ -8026,6 +8038,50 @@ void Player::SendLootRelease(ObjectGuid guid)
     SendDirectMessage(&data);
 }
 
+bool Player::IsWithinLootDistance(Creature const* creature) const
+{
+    return creature && (creature->IsWithinDistInMap(this, INTERACTION_DISTANCE) ||
+        creature->GetGUID() == m_companionLootGuid);
+}
+
+void Player::LootCreatureWithCompanion(Creature* creature, float radius, bool skin)
+{
+    constexpr uint32 SPELL_SKINNING = 8613;
+    if (!IsAlive() || !IsInWorld() || GetLootGUID() || m_companionLootGuid || radius <= 0.0f ||
+        HasPlayerFlag(PLAYER_FLAGS_NO_PLAY_TIME) || !creature || creature->IsAlive())
+        return;
+
+    if (skin)
+    {
+        if (!HasSkill(SKILL_SKINNING) || !HasSpell(SPELL_SKINNING) ||
+            creature->GetCreatureTemplate()->GetRequiredLootSkill() != SKILL_SKINNING)
+            return;
+        if (creature->loot.loot_type == LOOT_SKINNING && creature->GetLootRecipientGUID() != GetGUID())
+            return;
+    }
+    else if (!isAllowedToLoot(creature) || creature->loot.loot_type == LOOT_SKINNING)
+        return;
+
+    Creature* companion = GetMap()->GetCreature(GetCritterGUID());
+    if (!companion || !companion->IsAlive() || companion->GetOwnerGUID() != GetGUID() ||
+        !companion->IsWithinDistInMap(this, radius) || !companion->IsWithinDistInMap(creature, radius) ||
+        !companion->IsWithinLOSInMap(creature))
+        return;
+
+    // Only this synchronous server operation may use the companion's reach. Client loot packets
+    // keep the normal interaction distance, and no companion permission survives this call.
+    m_companionLootGuid = creature->GetGUID();
+    struct LootScope
+    {
+        ObjectGuid& Guid;
+        ~LootScope() { Guid.Clear(); }
+    } scope{m_companionLootGuid};
+    if (skin && creature->loot.loot_type != LOOT_SKINNING)
+        CastSpell(creature, SPELL_SKINNING, true); // Native skill, corpse, tool and gathering checks.
+    else
+        SendLoot(creature->GetGUID(), skin ? LOOT_SKINNING : LOOT_CORPSE);
+}
+
 void Player::SendLoot(ObjectGuid guid, LootType loot_type)
 {
     if (ObjectGuid lguid = GetLootGUID())
@@ -8249,7 +8305,7 @@ void Player::SendLoot(ObjectGuid guid, LootType loot_type)
         Creature* creature = GetMap()->GetCreature(guid);
 
         // must be in range and creature must be alive for pickpocket and must be dead for another loot
-        if (!creature || creature->IsAlive() != (loot_type == LOOT_PICKPOCKETING) || !creature->IsWithinDistInMap(this, INTERACTION_DISTANCE))
+        if (!creature || creature->IsAlive() != (loot_type == LOOT_PICKPOCKETING) || !IsWithinLootDistance(creature))
         {
             SendLootRelease(guid);
             return;
@@ -8417,6 +8473,34 @@ void Player::SendLoot(ObjectGuid guid, LootType loot_type)
         data << guid;
         data << uint8(loot_type);
         data << LootView(*loot, this, permission);
+
+        if (guid == m_companionLootGuid)
+        {
+            // Consume only slots the native loot view allows to be picked up. In particular,
+            // rolled, master-looted and locked quest items must not be taken automatically.
+            data.rpos(sizeof(uint64) + sizeof(uint8)); // GUID and loot type
+            data.read_skip<uint32>(); // gold
+            uint8 count;
+            data >> count;
+            for (uint8 index = 0; index < count; ++index)
+            {
+                uint8 slot, slotType;
+                data >> slot;
+                data.read_skip(5 * sizeof(uint32)); // Native LootItem packet fields
+                data >> slotType;
+                if (slotType != LOOT_SLOT_TYPE_ALLOW_LOOT && slotType != LOOT_SLOT_TYPE_OWNER)
+                    continue;
+                sScriptMgr->OnPlayerAfterCreatureLoot(this);
+                InventoryResult result;
+                StoreLootItem(slot, loot, result);
+                if (result != EQUIP_ERR_OK)
+                    break; // Leave uncollected items on the corpse when bags are full.
+            }
+            WorldPacket money;
+            m_session->HandleLootMoneyOpcode(money);
+            m_session->DoLootRelease(guid);
+            return;
+        }
 
         SendDirectMessage(&data);
 
@@ -12876,13 +12960,15 @@ void Player::AutoUnequipOffhandIfNeed(bool force /*= false*/)
     }
 
     // unequip offhand weapon if player doesn't have dual wield anymore
-    if (!CanDualWield() && (offItem->GetTemplate()->InventoryType == INVTYPE_WEAPONOFFHAND || offItem->GetTemplate()->InventoryType == INVTYPE_WEAPON))
+    if (!CanDualWield() && (offItem->GetTemplate()->InventoryType == INVTYPE_WEAPONOFFHAND ||
+        offItem->GetTemplate()->InventoryType == INVTYPE_WEAPON ||
+        offItem->GetTemplate()->InventoryType == INVTYPE_2HWEAPON))
         force = true;
 
     // unequip offhand weapon if player main hand weapon is a polearm or staff or fishing pole
     if (Item* mhWeapon = GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND))
         if (ItemTemplate const* mhWeaponProto = mhWeapon->GetTemplate())
-            if (!CanUseTwoHandWithShield(mhWeaponProto, offItem->GetTemplate()) &&
+            if (!CanTitanGrip(mhWeaponProto) && !CanUseTwoHandWithShield(mhWeaponProto, offItem->GetTemplate()) &&
                 (mhWeaponProto->SubClass == ITEM_SUBCLASS_WEAPON_POLEARM ||
                 mhWeaponProto->SubClass == ITEM_SUBCLASS_WEAPON_STAFF ||
                 mhWeaponProto->SubClass == ITEM_SUBCLASS_WEAPON_FISHING_POLE))
@@ -12891,7 +12977,7 @@ void Player::AutoUnequipOffhandIfNeed(bool force /*= false*/)
     // need unequip offhand for 2h-weapon without TitanGrip (in any from hands)
     Item const* main = GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);
     bool shieldPair = main && CanUseTwoHandWithShield(main->GetTemplate(), offItem->GetTemplate());
-    if (!force && (shieldPair || CanTitanGrip() ||
+    if (!force && (shieldPair || CanTitanGrip(offItem->GetTemplate()) ||
         (offItem->GetTemplate()->InventoryType != INVTYPE_2HWEAPON && !IsTwoHandUsed())))
     {
         UpdateTitansGrip();
@@ -13599,6 +13685,22 @@ void Player::SetCanBlock(bool value)
 void Player::SetCanTitanGrip(bool value)
 {
     m_canTitanGrip = value;
+}
+
+bool Player::HasBurningCommander() const
+{
+    return getClass() == CLASS_DEMON_HUNTER && GetLevel() >= 10 && HasActiveSpell(SPELL_BURNING_COMMANDER);
+}
+
+bool Player::CanTitanGrip(ItemTemplate const* weapon) const
+{
+    bool commander = HasBurningCommander();
+    if (!m_canTitanGrip && !commander)
+        return false;
+    return !weapon || (weapon->Class == ITEM_CLASS_WEAPON &&
+        weapon->SubClass != ITEM_SUBCLASS_WEAPON_STAFF &&
+        weapon->SubClass != ITEM_SUBCLASS_WEAPON_FISHING_POLE &&
+        (weapon->SubClass != ITEM_SUBCLASS_WEAPON_POLEARM || commander));
 }
 
 void Player::SetTemporarySpellReplacement(uint32 original, uint32 replacement)
@@ -17006,7 +17108,7 @@ void Player::StoreSpellCharges(SpellInfo const* spellInfo, SpellChargeState cons
 
 void Player::ConsumeSpellCharge(SpellInfo const* spellInfo, Spell* spell)
 {
-    if (!spellInfo->MaxCharges || GetCommandStatus(CHEAT_COOLDOWN))
+    if (!spellInfo->MaxCharges || GetCommandStatus(CHEAT_COOLDOWN) || GetCommandStatus(CHEAT_SPELLCHARGES))
         return;
     int32 recovery = int32(spellInfo->ChargeRecoveryTime);
     ApplySpellMod(spellInfo->Id, SPELLMOD_COOLDOWN, recovery, spell);
@@ -17033,21 +17135,32 @@ void Player::RestoreSpellCharge(uint32 spellId, uint32 count)
     SendSpellChargeState(spellId);
 }
 
+// Spell-charge GUI protocol implemented by the Ascension client (Extensions.dll).
+// The client handlers update a charge map keyed by SpellChargesCategory id:
+//   SMSG_CLEAR_ALL_SPELL_CHARGES (0x09C2): no payload, wipes every charge entry
+//   SMSG_SEND_SPELL_CHARGES      (0x09C4): u32 count + { u32 category; u32 remainingMs; u8 missing }
+//   SMSG_SET_SPELL_CHARGES       (0x09C5): u32 category; u32 remainingMs; u32 missing (0 clears)
+// `missing` is the recovering-charge count (the client shows max - missing) and
+// `remainingMs` the time until the next recovery. A zero `remainingMs` makes the
+// client drop the record, so the fully-charged case reuses the recovery time.
+static constexpr uint16 SMSG_CLEAR_ALL_SPELL_CHARGES = 0x09C2;
+static constexpr uint16 SMSG_SEND_SPELL_CHARGES = 0x09C4;
+static constexpr uint16 SMSG_SET_SPELL_CHARGES = 0x09C5;
+
 void Player::SendSpellChargeState(uint32 spellId) const
 {
     SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
-    if (!spellInfo || !spellInfo->MaxCharges || !GetSession())
+    if (!spellInfo || !spellInfo->MaxCharges || !spellInfo->ChargeCategoryId || !GetSession())
         return;
     SpellChargeState state = GetSpellCharges(spellInfo);
     uint64 now = std::chrono::duration_cast<Milliseconds>(GameTime::GetSystemTime().time_since_epoch()).count();
     uint32 remaining = uint32(state.NextRecovery > now ? state.NextRecovery - now : 0);
-    std::string message = "ASC_LOCAL_CHARGES\t" + std::to_string(spellId) + ":" +
-        std::to_string(state.Available) + ":" + std::to_string(spellInfo->MaxCharges) + ":" +
-        std::to_string(remaining) + ":" + std::to_string(state.RecoveryTime) + ":" +
-        std::to_string(spellInfo->ChargeRecoveryKey);
-    WorldPacket packet;
-    ChatHandler::BuildChatPacket(packet, CHAT_MSG_WHISPER, LANG_ADDON, GetGUID(), GetGUID(), message,
-        0, GetName(), GetName(), 0, false);
+    uint32 missing = spellInfo->MaxCharges - std::min<uint32>(state.Available, spellInfo->MaxCharges);
+
+    WorldPacket packet(SMSG_SET_SPELL_CHARGES, 12);
+    packet << uint32(spellInfo->ChargeCategoryId);
+    packet << uint32(missing && remaining ? remaining : std::max<uint32>(state.RecoveryTime, 1));
+    packet << uint32(std::min<uint32>(missing, 255));
     GetSession()->SendPacket(&packet);
 }
 
@@ -17065,11 +17178,62 @@ void Player::RestoreSpellChargeCategory(uint32 categoryId, uint32 count)
     }
 }
 
+void Player::RestoreAllSpellCharges()
+{
+    // Ranks share a recovery key, so each pool is restored once.
+    std::unordered_set<uint32> restored;
+    for (auto const& [spellId, playerSpell] : m_spells)
+    {
+        if (playerSpell->State == PLAYERSPELL_REMOVED || !playerSpell->Active)
+            continue;
+        SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId);
+        if (!info || !info->MaxCharges || !info->ChargeRecoveryKey)
+            continue;
+        if (!restored.insert(info->ChargeRecoveryKey).second)
+            continue;
+        RestoreSpellCharge(spellId, info->MaxCharges);
+    }
+}
+
 void Player::SendAllSpellChargeStates() const
 {
+    if (!GetSession())
+        return;
+
+    uint64 now = std::chrono::duration_cast<Milliseconds>(GameTime::GetSystemTime().time_since_epoch()).count();
+    std::unordered_map<uint32, std::pair<uint32, uint8>> partialPools;
     for (auto const& [spellId, playerSpell] : m_spells)
-        if (playerSpell->State != PLAYERSPELL_REMOVED && playerSpell->Active)
-            SendSpellChargeState(spellId);
+    {
+        if (playerSpell->State == PLAYERSPELL_REMOVED || !playerSpell->Active)
+            continue;
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
+        if (!spellInfo || !spellInfo->MaxCharges || !spellInfo->ChargeCategoryId)
+            continue;
+        SpellChargeState state = GetSpellCharges(spellInfo);
+        uint32 missing = spellInfo->MaxCharges - std::min<uint32>(state.Available, spellInfo->MaxCharges);
+        if (!missing)
+            continue;
+        uint32 remaining = uint32(state.NextRecovery > now ? state.NextRecovery - now : 0);
+        partialPools.emplace(spellInfo->ChargeCategoryId,
+            std::make_pair(std::max<uint32>(remaining, 1), uint8(std::min<uint32>(missing, 255))));
+    }
+
+    // Ranks share a recovery category, so one snapshot covers every skill button.
+    WorldPacket clear(SMSG_CLEAR_ALL_SPELL_CHARGES);
+    GetSession()->SendPacket(&clear);
+
+    if (partialPools.empty())
+        return;
+
+    WorldPacket packet(SMSG_SEND_SPELL_CHARGES, 4 + partialPools.size() * 9);
+    packet << uint32(partialPools.size());
+    for (auto const& [categoryId, pool] : partialPools)
+    {
+        packet << uint32(categoryId);
+        packet << uint32(pool.first);
+        packet << uint8(pool.second);
+    }
+    GetSession()->SendPacket(&packet);
 }
 
 std::string Player::GetDebugInfo() const

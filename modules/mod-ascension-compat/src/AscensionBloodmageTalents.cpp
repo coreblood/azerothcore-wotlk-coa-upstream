@@ -1,7 +1,10 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "DBCStores.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "SpellAuras.h"
+#include "SpellScript.h"
+#include "SpellInfo.h"
 
 namespace
 {
@@ -9,7 +12,46 @@ enum BloodmageTalentSpells : uint32
 {
     SPELL_LIQUIFY = 806310,
     SPELL_VAMPIRIC_POOLS = 504088,
-    SPELL_VAMPIRIC_POOLS_LEECH = 806311
+    SPELL_VAMPIRIC_POOLS_LEECH = 806311,
+    SPELL_DARKCASTING = 712383,
+    SPELL_BLOOD_TEAR_SPAWN = 712417,
+    SPELL_ACCURSED_FORM = 562572,
+    SPELL_SANGUINE_SCRIPTURE = 804851,
+    SPELL_SANGUINE_SCRIPTURE_BUFF = 504264
+};
+
+class spell_ascension_animated_blood : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_animated_blood);
+
+    bool Validate(SpellInfo const*) override
+    {
+        return ValidateSpellInfo({SPELL_DARKCASTING, SPELL_BLOOD_TEAR_SPAWN});
+    }
+
+    void HandleExtraWorms(SpellEffIndex index)
+    {
+        if (GetSpellInfo()->Effects[index].TriggerSpell != SPELL_BLOOD_TEAR_SPAWN)
+            return;
+        PreventHitDefaultEffect(index);
+        Unit* caster = GetCaster();
+        Aura* darkcasting = caster->GetAura(SPELL_DARKCASTING, caster->GetGUID());
+        if (!darkcasting)
+            return;
+        uint8 const count = darkcasting->GetStackAmount();
+        darkcasting->Remove();
+        // The helper's zero summon count otherwise falls back to one worm on every ordinary cast.
+        // Darkcasting supplies the extra worms; the parent supplies its rank/empowerment count.
+        if (count)
+            caster->CastCustomSpell(SPELL_BLOOD_TEAR_SPAWN, SPELLVALUE_BASE_POINT0, count, caster, true);
+    }
+
+    void Register() override
+    {
+        // This destination-only helper is triggered in LAUNCH, before target-specific effects.
+        OnEffectLaunch += SpellEffectFn(spell_ascension_animated_blood::HandleExtraWorms,
+            EFFECT_1, SPELL_EFFECT_TRIGGER_SPELL);
+    }
 };
 
 class bloodmage_talent_events : public UnitScript
@@ -27,6 +69,35 @@ public:
         if (aura->GetId() == SPELL_LIQUIFY && aura->GetCasterGUID() == player->GetGUID() &&
             player->HasAura(SPELL_VAMPIRIC_POOLS))
             player->CastSpell(player, SPELL_VAMPIRIC_POOLS_LEECH, true);
+        if (aura->GetId() == SPELL_ACCURSED_FORM && aura->GetCasterGUID() == player->GetGUID() &&
+            player->HasAura(SPELL_SANGUINE_SCRIPTURE))
+            player->CastSpell(player, SPELL_SANGUINE_SCRIPTURE_BUFF, true);
+    }
+};
+
+class bloodmage_talent_contracts : public GlobalScript
+{
+public:
+    bloodmage_talent_contracts() : GlobalScript("bloodmage_talent_contracts",
+        {GLOBALHOOK_ON_LOAD_SPELL_CUSTOM_ATTR}) { }
+
+    void OnLoadSpellCustomAttr(SpellInfo* info) override
+    {
+        if (!info || info->Id != SPELL_VAMPIRIC_POOLS_LEECH || info->SpellFamilyName != 26 ||
+            info->Effects[EFFECT_0].Effect != SPELL_EFFECT_HEALTH_LEECH)
+            return;
+
+        // Vampiric Pools leeches and fears the same nearby targets when Liquify ends.
+        // Keep the existing leech amount/coefficient and native damage-break proc data.
+        info->DurationEntry = sSpellDurationStore.LookupEntry(32); // Six seconds.
+        info->AttributesCu |= SPELL_ATTR0_CU_NEGATIVE_EFF1;
+        auto& fear = info->Effects[EFFECT_1];
+        fear.Effect = SPELL_EFFECT_APPLY_AURA;
+        fear.ApplyAuraName = SPELL_AURA_MOD_FEAR;
+        fear.Mechanic = MECHANIC_FEAR;
+        fear.TargetA = info->Effects[EFFECT_0].TargetA;
+        fear.TargetB = info->Effects[EFFECT_0].TargetB;
+        fear.RadiusEntry = info->Effects[EFFECT_0].RadiusEntry;
     }
 };
 }
@@ -34,4 +105,6 @@ public:
 void AddSC_AscensionBloodmageTalents()
 {
     new bloodmage_talent_events();
+    new bloodmage_talent_contracts();
+    RegisterSpellScript(spell_ascension_animated_blood);
 }

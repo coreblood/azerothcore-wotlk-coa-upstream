@@ -1439,7 +1439,10 @@ void OpcodeTable::Initialize()
     /*0x51C*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_COMMENTATOR_SKIRMISH_QUEUE_RESULT1,                 STATUS_NEVER);
     /*0x51D*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_COMMENTATOR_SKIRMISH_QUEUE_RESULT2,                 STATUS_NEVER);
     /*0x51E*/ DEFINE_SERVER_OPCODE_HANDLER(SMSG_MULTIPLE_MOVES, STATUS_NEVER);
-    /*0x51F*/ DEFINE_HANDLER(TC9_CMSG_PREPARE_FOR_REDIRECT,                                         STATUS_AUTHED,     PROCESS_THREADUNSAFE,   &WorldSession::HandleTC9PrepareForRedirect);
+    // Ascension client extension opcode: the client reports local anti-tamper/anti-debug
+    // detections here. The Cloud9 redirect flow shares this wire value, but it is driven
+    // by internal calls (WorldSession::HandleTC9PrepareForRedirect), not by the client.
+    /*0x51F*/ DEFINE_HANDLER(CMSG_ANTICHEAT_ALERT,                                                  STATUS_AUTHED,     PROCESS_THREADUNSAFE,   &WorldSession::HandleAnticheatAlert                     );
     /*0x520*/ DEFINE_SERVER_OPCODE_HANDLER(TC9_SMSG_READY_FOR_REDIRECT, STATUS_NEVER);
 
 #undef DEFINE_HANDLER

@@ -12,6 +12,12 @@ class Unit;
 class Spell;
 namespace AscensionFelsworn
 {
+enum FelswornSpells : uint32
+{
+    BurningCommander = 92089,
+    MannorothFelfury = 801043
+};
+
 struct Debt
 {
     uint64 remaining;

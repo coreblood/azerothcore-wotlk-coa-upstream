@@ -1000,7 +1000,8 @@ enum PlayerCommandStates
     CHEAT_CASTTIME = 0x02,
     CHEAT_COOLDOWN = 0x04,
     CHEAT_POWER = 0x08,
-    CHEAT_WATERWALK = 0x10
+    CHEAT_WATERWALK = 0x10,
+    CHEAT_SPELLCHARGES = 0x20
 };
 
 // Used for OnGiveXP PlayerScript hook
@@ -1849,6 +1850,7 @@ public:
     void ConsumeSpellCharge(SpellInfo const* spellInfo, Spell* spell);
     void RestoreSpellCharge(uint32 spellId, uint32 count = 1);
     void RestoreSpellChargeCategory(uint32 categoryId, uint32 count);
+    void RestoreAllSpellCharges();
     void SendSpellChargeState(uint32 spellId) const;
     void SendAllSpellChargeStates() const;
     uint32 GetLastPotionId() { return m_lastPotionId; }
@@ -2259,7 +2261,8 @@ public:
     void SetCanParry(bool value);
     [[nodiscard]] bool CanBlock() const { return m_canBlock; }
     void SetCanBlock(bool value);
-    [[nodiscard]] bool CanTitanGrip() const { return m_canTitanGrip; }
+    [[nodiscard]] bool HasBurningCommander() const;
+    [[nodiscard]] bool CanTitanGrip(ItemTemplate const* weapon = nullptr) const;
     void SetCanTitanGrip(bool value);
     [[nodiscard]] bool CanTameExoticPets() const { return IsGameMaster() || HasAuraType(SPELL_AURA_ALLOW_TAME_PET_TYPE); }
 
@@ -2331,6 +2334,8 @@ public:
     std::vector<ItemSetEffect*> ItemSetEff;
 
     void SendLoot(ObjectGuid guid, LootType loot_type);
+    void LootCreatureWithCompanion(Creature* creature, float radius, bool skin = false);
+    bool IsWithinLootDistance(Creature const* creature) const;
     void SendLootError(ObjectGuid guid, LootError error);
     void SendLootRelease(ObjectGuid guid);
     void SendNotifyLootItemRemoved(uint8 lootSlot);
@@ -2891,6 +2896,7 @@ protected:
 
     void outDebugValues() const;
     ObjectGuid m_lootGuid;
+    ObjectGuid m_companionLootGuid;
 
     TeamId m_team;
     uint32 m_nextSave; // pussywizard

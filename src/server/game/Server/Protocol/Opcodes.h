@@ -1338,7 +1338,7 @@ enum Opcodes : uint16
     SMSG_COMMENTATOR_SKIRMISH_QUEUE_RESULT1         = 0x51C,
     SMSG_COMMENTATOR_SKIRMISH_QUEUE_RESULT2         = 0x51D,
     SMSG_MULTIPLE_MOVES                             = 0x51E, // uncompressed version of SMSG_COMPRESSED_MOVES
-    TC9_CMSG_PREPARE_FOR_REDIRECT                   = 0x51F,
+    CMSG_ANTICHEAT_ALERT                            = 0x51F, // Ascension client: local anti-tamper/anti-debug alert, see WorldSession::HandleAnticheatAlert
     TC9_SMSG_READY_FOR_REDIRECT                     = 0x520,
     NUM_MSG_TYPES                                   = 0x521
 };

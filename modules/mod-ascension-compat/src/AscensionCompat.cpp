@@ -81,6 +81,7 @@
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -94,6 +95,7 @@
 using namespace Acore::ChatCommands;
 
 namespace {
+constexpr uint16 CMSG_ANTICHEAT_ALERT = 0x051F;
 constexpr uint16 CMSG_VANITY_DELIVERY = 0x0523;
 constexpr uint16 CMSG_APPLY_APPEARANCES = 0x0697;
 constexpr uint16 SMSG_APPLY_APPEARANCES_RESULT = 0x0698;
@@ -111,12 +113,24 @@ constexpr uint16 CMSG_MISSILE_FIRE_POSITION = 0x09C7;
 constexpr uint32 SPELL_PYROMANCER_HEAT = 807389;
 constexpr uint32 SPELL_PYROMANCER_EMBER = 807533;
 constexpr uint32 SPELL_PRIMALIST_EARTHSHAPING = 680441;
+constexpr uint32 SPELL_STORMBRINGER_STATIC = 803102;
+constexpr uint32 SPELL_STORMBRINGER_CHARGED_CONDUIT = 803790;
 constexpr uint32 SPELL_REAPER_REAPED_SOUL = 500363;
 constexpr uint32 SPELL_REAPER_SOUL_INFUSION = 803031;
 constexpr uint32 SPELL_REAPER_SOUL_FRAGMENT = 805077;
 constexpr uint32 SPELL_REAPER_GENERATE_SOUL = 805078;
 constexpr char ASCENSION_LOCAL_RESOURCE_PREFIX[] = "ASC_LOCAL_RESOURCE";
 constexpr char ASCENSION_ACTIVE_SPEC_SETTING[] = "core.ascension_active_spec";
+
+enum CompanionLoot : uint32
+{
+    APPEARANCE_CATEGORY_COMPANION_LOOT = 38,
+    APPEARANCE_CATEGORY_COMPANION_SKINNING = 61,
+    APPEARANCE_LOOT_TRANSFIGURATOR = 47520,
+    APPEARANCE_SKIN_PEELER = 639807,
+    SPELL_LOOT_TRANSFIGURATOR = 84419,
+    SPELL_SKIN_PEELER = 92864
+};
 
 constexpr uint8 PYROMANCER_HEAT_PER_EMBER = 100;
 constexpr uint8 REAPER_SOUL_FRAGMENT_COST = 3;
@@ -249,6 +263,8 @@ struct PlayerCollectionState {
   std::vector<uint32> PendingCompanionSpells;
   std::size_t NextCompanionSpell = 0;
   uint32 CompanionSpellTimer = 0;
+  uint32 CompanionLootTimer = 0;
+  uint32 CompanionSkinningTimer = 0;
   bool CanSeeItemAppearances = true;
   bool CanSeeSpellAppearances = true;
 };
@@ -778,6 +794,17 @@ public:
       if (player->HasSkill(definition.SkillId))
         player->SetSkill(definition.SkillId, 0, 0, 0);
     }
+
+    // Defense and Unarmed are intrinsic combat skills, absent from the equipment proficiency catalog.
+    // Keep their current value and cap in step with the weapon skills on login and every level change.
+    for (uint16 skill : std::array<uint16, 2>{SKILL_DEFENSE, SKILL_UNARMED})
+      if (player->HasSkill(skill))
+      {
+        uint16 const maximum = player->GetMaxSkillValueForLevel();
+        player->SetSkill(skill, player->GetSkillStep(skill), maximum, maximum);
+        if (skill == SKILL_DEFENSE)
+          player->UpdateDefenseBonusesMod();
+      }
 
     _proficiencySynchronizations.erase(guid);
     if (learned || removed)
@@ -1568,6 +1595,10 @@ public:
                     rule.LastSpellId))
                 continue;
 
+            if (rule.ClassId == CLASS_STORMBRINGER && rule.ResourceSpellId == SPELL_STORMBRINGER_STATIC &&
+                player->HasAura(SPELL_STORMBRINGER_CHARGED_CONDUIT))
+                break;
+
             if (rule.PreserveCostAuraSpellId &&
                 player->HasAura(rule.PreserveCostAuraSpellId) &&
                 rule.PreserveCostChancePercent &&
@@ -2283,7 +2314,39 @@ public:
 
     ProcessPendingAppearanceAdds(player, diff);
     ProcessPendingCompanionSpells(player, diff);
+    ProcessCompanionLoot(player, diff);
+    ProcessCompanionLoot(player, diff, true);
   }
+
+    void ProcessCompanionLoot(Player* player, uint32 diff, bool skin = false)
+    {
+        uint32 const category = skin ? APPEARANCE_CATEGORY_COMPANION_SKINNING : APPEARANCE_CATEGORY_COMPANION_LOOT;
+        uint32 const appearance = skin ? APPEARANCE_SKIN_PEELER : APPEARANCE_LOOT_TRANSFIGURATOR;
+        auto state = GetState(player);
+        if (!state || state->ActiveAppearances[category] != appearance ||
+            !state->CollectedAppearances.contains(appearance))
+            return;
+        uint32& timer = skin ? state->CompanionSkinningTimer : state->CompanionLootTimer;
+        if (timer > diff)
+        {
+            timer -= diff;
+            return;
+        }
+        SpellInfo const* spell = sSpellMgr->GetSpellInfo(skin ? SPELL_SKIN_PEELER : SPELL_LOOT_TRANSFIGURATOR);
+        if (!spell || !spell->Effects[EFFECT_0].Amplitude)
+            return;
+        timer = spell->Effects[EFFECT_0].Amplitude;
+        Creature* companion = player->GetMap()->GetCreature(player->GetCritterGUID());
+        if (!companion || !companion->IsAlive() || companion->GetOwnerGUID() != player->GetGUID())
+            return;
+        float const radius = spell->Effects[EFFECT_0].CalcRadius(player);
+        if (radius <= 0.0f)
+            return;
+        std::list<Creature*> corpses;
+        companion->GetDeadCreatureListInGrid(corpses, radius, true);
+        for (Creature* creature : corpses)
+            player->LootCreatureWithCompanion(creature, radius, skin);
+    }
 
     void InitializeRiding(Player* player) const
     {
@@ -3179,6 +3242,12 @@ public:
     if (opcode < firstOpcode || opcode > lastOpcode)
       return true;
 
+    // The Ascension client's anti-tamper layer reports local detections here.
+    // Leave the packet to the core's CMSG_ANTICHEAT_ALERT handler instead of
+    // consuming it during protocol discovery.
+    if (opcode == CMSG_ANTICHEAT_ALERT)
+      return true;
+
     if (QueueAscensionManastormPacket(session, packet))
       return false;
 
@@ -3223,6 +3292,10 @@ public:
       : CommandScript("AscensionCompatCommandScript") {}
 
   ChatCommandTable GetCommands() const override {
+    static ChatCommandTable spellChargesCommandTable = {
+        {"reset", HandleSpellChargesResetCommand, SEC_PLAYER, Console::No},
+        {"resync", HandleSpellChargesResyncCommand, SEC_PLAYER, Console::No}};
+
     static ChatCommandTable commandTable = {
         {"localfreshcheck", HandleAscensionFreshCharacterCheck, SEC_ADMINISTRATOR, Console::Yes},
         {"localappearance", HandleLocalAppearanceCommand, SEC_PLAYER,
@@ -3233,6 +3306,7 @@ public:
         {"localresource", HandleLocalResourceCommand, SEC_PLAYER,
          Console::No},
         {"localcharges", HandleLocalChargesCommand, SEC_PLAYER, Console::No},
+        {"spellcharges", spellChargesCommandTable},
         {"localclassrepair", HandleLocalClassRepairCommand, SEC_PLAYER,
          Console::No}};
     return commandTable;
@@ -3417,9 +3491,68 @@ public:
     }
     return true;
   }
+
+  // Debug helpers for the native client charge UI (SMSG_SET/SEND_SPELL_CHARGES).
+  static bool HandleSpellChargesResetCommand(ChatHandler* handler)
+  {
+    Player* player = handler->GetPlayer();
+    if (!player)
+      return false;
+
+    player->RestoreAllSpellCharges();
+    player->SendAllSpellChargeStates();
+    handler->SendSysMessage("All spell-charge pools reset to full.");
+    return true;
+  }
+
+  static bool HandleSpellChargesResyncCommand(ChatHandler* handler)
+  {
+    Player* player = handler->GetPlayer();
+    if (!player)
+      return false;
+
+    player->SendAllSpellChargeStates();
+    SendAscensionRunemasterEchoesOwnership(player);
+    handler->SendSysMessage("Spell-charge state resent to the client.");
+    return true;
+  }
 };
 
 class AscensionCompatPlayerScript : public PlayerScript {
+    std::unordered_map<ObjectGuid, std::vector<ObjectGuid>> _pendingEquipment;
+
+    void EquipNewItems(Player* player)
+    {
+        auto itr = _pendingEquipment.find(player->GetGUID());
+        if (itr == _pendingEquipment.end())
+            return;
+
+        // Finish the acquisition before moving items; its caller still uses the original bag positions.
+        auto items = std::move(itr->second);
+        _pendingEquipment.erase(itr);
+        for (ObjectGuid guid : items)
+        {
+            Item* item = player->GetItemByGuid(guid);
+            if (!item || item->IsInTrade() || !Player::IsInventoryPos(item->GetPos()))
+                continue;
+
+            uint16 dest = 0;
+            if (player->CanEquipItem(NULL_SLOT, dest, item, false) != EQUIP_ERR_OK ||
+                !Player::IsEquipmentPos(dest) || player->GetItemByPos(dest))
+                continue;
+
+            // An empty main hand must not cause an occupied off hand to be unequipped.
+            Item* offhand = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND);
+            ItemTemplate const* proto = item->GetTemplate();
+            if (uint8(dest) == EQUIPMENT_SLOT_MAINHAND && proto->InventoryType == INVTYPE_2HWEAPON &&
+                offhand && !player->CanTitanGrip(proto) &&
+                !player->CanUseTwoHandWithShield(proto, offhand->GetTemplate()))
+                continue;
+
+            player->SwapItem(item->GetPos(), dest);
+        }
+    }
+
 public:
   AscensionCompatPlayerScript()
       : PlayerScript(
@@ -3583,6 +3716,7 @@ public:
     }
 
   void OnPlayerLogout(Player *player) override {
+    _pendingEquipment.erase(player->GetGUID());
     AscensionClassService::Instance().OnPlayerLogout(player);
     AscensionResourceService::Instance().OnPlayerLogout(player);
     AscensionCollectionService::Instance().OnPlayerLogout(player);
@@ -3593,6 +3727,7 @@ public:
             AscensionCompatConfig::ENABLED)) {
       AscensionResourceService::Instance().OnPlayerUpdate(player);
       AscensionCollectionService::Instance().OnPlayerUpdate(player, diff);
+      EquipNewItems(player);
     }
   }
 
@@ -3609,6 +3744,10 @@ public:
   void OnPlayerStoreNewItem(Player *player, Item *item,
                             uint32 /*count*/) override {
     AscensionCollectionService::Instance().OnItemObtained(player, item);
+    if (item && player->IsInWorld() && player->getClass() >= CLASS_BARBARIAN &&
+        player->getClass() <= CLASS_SPIRIT_MAGE &&
+        ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED))
+        _pendingEquipment[player->GetGUID()].push_back(item->GetGUID());
   }
 
   void OnPlayerCreateItem(Player *player, Item *item,
@@ -3811,6 +3950,47 @@ public:
   }
 };
 
+void ApplyAscensionExperienceContracts(SpellInfo* info)
+{
+    if (!info)
+        return;
+
+    switch (info->Id)
+    {
+        case 57353: // Heirloom Experience Bonus +10%
+        case 71354:
+        case 157353: // Heirloom Experience Bonus +20%
+        case 818046: // Potion of Experience
+        case 819046:
+            // Copied source tags 2/8 select quest XP. Native aura 200 only modifies kill XP.
+            for (SpellEffectInfo& effect : info->Effects)
+                if (effect.ApplyAuraName == SPELL_AURA_MOD_XP_PCT &&
+                    (effect.MiscValue == 2 || effect.MiscValue == 8))
+                    effect.ApplyAuraName = SPELL_AURA_MOD_XP_QUEST_PCT;
+            break;
+        case 818059: // Aura of Experience: 50% for kills and quests, shared with the party.
+        {
+            SpellEffectInfo& kills = info->Effects[EFFECT_1];
+            SpellEffectInfo& quests = info->Effects[EFFECT_2];
+            if (kills.Effect != SPELL_EFFECT_APPLY_AREA_AURA_PARTY ||
+                kills.ApplyAuraName != SPELL_AURA_MOD_XP_PCT || kills.MiscValue != 63 || quests.Effect)
+                break;
+            kills.BasePoints = 49;
+            kills.DieSides = 1;
+            quests.Effect = kills.Effect;
+            quests.ApplyAuraName = SPELL_AURA_MOD_XP_QUEST_PCT;
+            quests.BasePoints = kills.BasePoints;
+            quests.DieSides = kills.DieSides;
+            quests.TargetA = kills.TargetA;
+            quests.TargetB = kills.TargetB;
+            quests.RadiusEntry = kills.RadiusEntry;
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 class AscensionCompatChangelogScript : public GlobalScript
 {
 public:
@@ -3822,6 +4002,7 @@ public:
         if (ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED))
         {
             ApplyAscensionChangelogSpellChanges(spellInfo);
+            ApplyAscensionExperienceContracts(spellInfo);
             ApplyAscensionClassMechanics(spellInfo);
             ApplyAscensionPrimalistEarthshapingContracts(spellInfo);
             ApplyAscensionPrimalistSpiritBeastContract(spellInfo);

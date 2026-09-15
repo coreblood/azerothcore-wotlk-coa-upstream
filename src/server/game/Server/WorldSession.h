@@ -694,6 +694,9 @@ public:                                                 // opcodes handlers
 
     void HandleTC9PrepareForRedirect(WorldPacket& recvData);
 
+    // Ascension client extension: local anti-tamper/anti-debug alert (opcode 0x51F).
+    void HandleAnticheatAlert(WorldPacket& recvData);
+
     // played time
     void HandlePlayedTime(WorldPackets::Character::PlayedTimeClient& packet);
 
@@ -1325,6 +1328,10 @@ private:
     uint32 _timeSyncTimer;
 
     uint32 _orderCounter;
+
+    // Ascension client anti-cheat alerts (opcode 0x51F), flood guard per session.
+    uint32 _timeLastAnticheatAlertWindow = 0;
+    uint32 _anticheatAlertsInWindow = 0;
 
     WorldSession(WorldSession const& right) = delete;
     WorldSession& operator=(WorldSession const& right) = delete;

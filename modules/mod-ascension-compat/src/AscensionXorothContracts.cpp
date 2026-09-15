@@ -10,11 +10,30 @@
 #include <algorithm>
 namespace AscensionXoroth
 {
+namespace
+{
+enum FleshHook : uint32
+{
+    SPELL_FLESH_HOOK_PULL = 800605,
+    SPELL_RANGE_THIRTY_YARDS = 4
+};
+}
+
 void ApplyContracts(SpellInfo* info)
 {
     if (!info || info->SpellFamilyName != 23)
         return;
     uint32 id = info->Id;
+    if (id == SPELL_WARPATH_PROTECTION && info->Effects[EFFECT_0].ApplyAuraName == SPELL_AURA_MOD_MINIMUM_SPEED)
+        info->DurationEntry = sSpellDurationStore.LookupEntry(27); // Three seconds after Unleash Pestilence.
+    if (id == SPELL_FLESH_HOOK_PULL)
+    {
+        // The parent has already passed its range and hit checks before scheduling this helper.
+        // Do not roll melee avoidance again or reject an enemy that approaches during the delay.
+        // Native spell/mechanic immunities still apply to this non-damaging pull.
+        info->DmgClass = SPELL_DAMAGE_CLASS_NONE;
+        info->RangeEntry = sSpellRangeStore.LookupEntry(SPELL_RANGE_THIRTY_YARDS);
+    }
     if (id == 520440 || id == 520441)
         for (auto& effect : info->Effects)
             effect.Effect = 0; // Legacy delayed removal must not erase Demonfire generated after reservation.
@@ -277,6 +296,12 @@ class xoroth_scaling : public UnitScript
             player = Owner(caster->GetOwner());
         if (!player || !info)
             return;
+        if (info->Id == 630930 && index == EFFECT_0 && caster->GetEntry() == 510100)
+        {
+            // Burning Slap: copied SpellDescriptionVariables row 182 ($scalingbp), then AP/SP bonuses.
+            double level = caster->GetLevel();
+            value *= float(0.0267291844060354 + 0.0048541098014737 * level + 0.0001859597762293 * level * level);
+        }
         for (auto const& row : XorothCoefficients)
             if (row.spell == info->Id && row.effect == index)
             {

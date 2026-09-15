@@ -741,6 +741,8 @@ Logger.spells.scripts=2,Console Errors
 # Logger.chat.log=4,Console Server
 # Logger.chat.log.addon=4,Console Server
 # Logger.chat.system=4,Console Server
+# Logger.anticheat=3,Console Server
+#    (client anti-cheat alert handling follows the Warden.Enabled switch)
 # Logger.cheat=4,Console Server
 # Logger.commands.ra=4,Console Server
 # Logger.condition=4,Console Server

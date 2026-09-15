@@ -16,6 +16,9 @@ void ApplyContracts(SpellInfo* info)
     if (!info || info->SpellFamilyName != 20)
         return;
     uint32 id = info->Id;
+    // Blood of Mannoroth's sole resource helper must grant all six charges, including from zero.
+    if (id == MannorothFelfury)
+        info->Effects[EFFECT_0].MiscValue = 6;
     auto dummy = [info](uint8 slot) {
         info->Effects[slot].ApplyAuraName = SPELL_AURA_DUMMY;
         info->Effects[slot].TriggerSpell = 0;
@@ -113,8 +116,12 @@ void ApplyContracts(SpellInfo* info)
         dummy(0); // preserve native radius and cooldown, select all eligible allies in the cast hook
     if (id == 800203)
         info->Effects[2].Effect = 0; // mana burn only after a successful interrupt
-    if (id == 92089)
+    if (id == BurningCommander)
+    {
         periodic(1, 3000);
+        // Player checks the authored weapon set directly; native Titan's Grip adds an unrelated damage penalty.
+        info->Effects[EFFECT_2].Effect = 0;
+    }
     if (id == 574145)
         dummy(0);
     if (id == 574150 || id == 804105 || id == 801894)
