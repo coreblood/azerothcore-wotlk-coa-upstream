@@ -146,6 +146,8 @@ void Summon(Player* player, uint32 spell, Unit* target, Position const& location
     if (!entry)
         return;
     uint32 count = spell == CallSseratus ? 3 + (player->HasAura(SerpentHandler) ? 2 : 0) : spell == Marionette ? 5 : 1;
+    if (spell == Mimic)
+        count = uint32(std::max(1, info->Effects[EFFECT_2].CalcValue(player)));
     int32 duration = spell == SpiritLink ? sSpellMgr->GetSpellInfo(LinkTimer)->GetDuration() : info->GetDuration();
     player->ApplySpellMod(spell, SPELLMOD_DURATION, duration);
     if (spell == Marionette)
@@ -224,6 +226,11 @@ class npc_ascension_witch_doctor : public ScriptedAI
         }
         if (me->GetEntry() == NpcMarionette)
             _timer = 2000;
+        // The Cleansing Idol advertises a 3 second cleanse and repeats on that interval, but the
+        // default one-millisecond timer made it cleanse the instant it landed, so re-dropping it
+        // cleansed on demand. Wait out the first interval like the wards and the Marionette do.
+        if (me->GetEntry() == NpcCleanse)
+            _timer = 3000;
         if (me->GetEntry() == NpcSerpent || me->GetEntry() == NpcMassSerpent || me->GetEntry() == NpcViper)
             _timer = WardAttackInterval();
     }

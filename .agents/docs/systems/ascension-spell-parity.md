@@ -286,3 +286,13 @@ unresolved; keep its current first/higher-rank coefficients until evidence estab
   Reject conflicting or extra action slots before installation; retaining failed proposals is not a routine requirement.
 - Retained Tinker proc updates use HitMask 9283 (normal/crit/block/absorb/full block). 9331 would also
   admit dodge/parry. Exercise all native hit bits and retain the scripts' positive-damage filters.
+
+## Aura metadata and stacking groups
+
+- A nonzero raw `ApplyAuraName` in Spell.dbc does not establish an aura when the effect itself is zero.
+  Use native `IsAura`/`HasAura` for proc disable masks and group compatibility. Validate actual bindings,
+  not just a simplified hand-built record with the expected flags.
+- Group IDs are not semantic names. Expand subgroups and execute the native same-effect inference:
+  group 1038 includes a stat-percent subgroup, despite also listing Sanctuary. A damage-taken aura requires
+  a group that actually selects its aura type. Verify largest-only stacking and preservation of independent
+  absorb/stagger effects using the real native group methods.

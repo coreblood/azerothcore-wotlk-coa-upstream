@@ -17,30 +17,54 @@ import sys
 import tempfile
 import time
 
+from world_cache import WorldCache, input_fingerprint
+
 ROOT = Path(__file__).resolve().parents[2]
 CREATE_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 IDENTIFIER = re.compile(r'[A-Za-z_][A-Za-z0-9_]*\Z')
 ACTOR_ID = re.compile(r'[a-z][a-z0-9_]{0,31}\Z')
 LOCAL_HOSTS = {'127.0.0.1', 'localhost', '::1'}
 METRICS = {
-    'health', 'max_health', 'power', 'max_power', 'alive', 'combat', 'casting', 'level',
-    'aura', 'aura_stacks', 'aura_charges', 'aura_duration_ms', 'aura_amount',
-    'knows_spell', 'has_talent', 'talent_points', 'cooldown_ms', 'item_count',
+    'health', 'health_pct', 'max_health', 'power', 'max_power', 'alive', 'combat', 'casting', 'level',
+    'aura', 'aura_stacks', 'aura_charges', 'aura_duration_ms', 'aura_amount', 'aura_positive',
+    'knows_spell', 'has_talent', 'talent_points', 'cooldown_ms', 'item_count', 'bank_bag_slots',
+    'pet_entry', 'pet_aura_stacks', 'owned_creature_count',
+    'charm_entry', 'charm_aura_stacks', 'controls_self', 'private_instance',
+    'dynamic_object', 'dynamic_object_duration_ms', 'gossip_options',
+    'cast_speed_multiplier', 'spell_crit_chance', 'spell_power_cost', 'spell_damage_done', 'melee_damage_done',
+    'who_count', 'who_class', 'loot_count', 'loot_entry', 'loot_received',
+    'quest_rewarded', 'spell_damage_taken', 'melee_damage_taken',
 }
-METRIC_FIELDS = {'actor', 'metric', 'spell', 'power', 'caster', 'effect', 'item', 'relative_to'}
+METRIC_FIELDS = {'actor', 'metric', 'spell', 'power', 'caster', 'effect', 'item', 'entry',
+                 'relative_to', 'ratio_to', 'target', 'quest'}
 ACTIONS = {
     'console': ({'command'}, {'command'}),
+    'command': ({'actor', 'command'}, {'actor', 'command'}),
     'wait': ({'ms'}, {'ms'}),
     'snapshot': ({'actor', 'metric', 'save_as'}, METRIC_FIELDS | {'save_as'}),
     'assert': ({'actor', 'metric'}, METRIC_FIELDS | {'equals', 'min', 'max', 'within_ms'}),
     'learn': ({'actor', 'spell'}, {'actor', 'spell'}),
     'unlearn': ({'actor', 'spell'}, {'actor', 'spell'}),
-    'cast': ({'actor', 'spell'}, {'actor', 'spell', 'target'}),
+    'set_aura': ({'actor', 'spell', 'stacks'}, {'actor', 'spell', 'stacks'}),
+    'cast': ({'actor', 'spell'}, {'actor', 'spell', 'target', 'destination'}),
+    'attack': ({'actor', 'target'}, {'actor', 'target'}),
+    'cast_charm': ({'actor', 'spell'}, {'actor', 'spell', 'target'}),
+    'gossip_hello': ({'actor'}, {'actor', 'target'}),
+    'gossip_select': ({'actor', 'option'}, {'actor', 'option'}),
+    'who': ({'actor'}, {'actor', 'target', 'race_mask', 'class_mask'}),
+    'open_item': ({'actor', 'item'}, {'actor', 'item'}),
+    'collect_loot': ({'actor'}, {'actor'}),
+    'close_loot': ({'actor'}, {'actor'}),
+    'prepare_quest': ({'actor', 'quest'}, {'actor', 'quest'}),
+    'reward_quest': ({'actor', 'quest'}, {'actor', 'quest', 'choice'}),
+    'restore_quest_spells': ({'actor'}, {'actor'}),
+    'login_hooks': ({'actor'}, {'actor'}),
     'talent': ({'actor', 'talent', 'rank'}, {'actor', 'talent', 'rank'}),
     'reset_talents': ({'actor'}, {'actor'}),
     'add_item': ({'actor', 'item'}, {'actor', 'item', 'count'}),
     'equip': ({'actor', 'item', 'slot'}, {'actor', 'item', 'slot'}),
     'use_item': ({'actor', 'item', 'spell'}, {'actor', 'item', 'spell', 'target'}),
+    'set_level': ({'actor', 'value'}, {'actor', 'value'}),
     'set_health': ({'actor', 'value'}, {'actor', 'value'}),
     'set_power': ({'actor', 'value'}, {'actor', 'value', 'power'}),
 }
@@ -89,7 +113,9 @@ def validate(scenario):
     player_ids = set()
     actor_ids = set()
     for player in players:
-        keys(player, {'id', 'race', 'class'}, {'id', 'race', 'class', 'level', 'spell_hit_rating'}, 'player')
+        keys(player, {'id', 'race', 'class'},
+             {'id', 'race', 'class', 'level', 'spell_hit_rating', 'spell_crit_rating', 'ranged_hit_rating',
+              'melee_hit_rating', 'expertise_rating'}, 'player')
         identity = player['id']
         require(isinstance(identity, str) and ACTOR_ID.fullmatch(identity), 'Invalid player id')
         require(identity not in actor_ids, 'Duplicate actor id')
@@ -99,6 +125,10 @@ def validate(scenario):
             number(player[key], key, 1, 255, True)
         number(player.get('level', 80), 'level', 1, 255, True)
         number(player.get('spell_hit_rating', 0), 'spell_hit_rating', 0, 100000, True)
+        number(player.get('spell_crit_rating', 0), 'spell_crit_rating', 0, 100000, True)
+        number(player.get('ranged_hit_rating', 0), 'ranged_hit_rating', 0, 100000, True)
+        number(player.get('melee_hit_rating', 0), 'melee_hit_rating', 0, 100000, True)
+        number(player.get('expertise_rating', 0), 'expertise_rating', 0, 100000, True)
     for creature in creatures:
         keys(creature, {'id', 'owner', 'entry'},
              {'id', 'owner', 'entry', 'distance', 'faction', 'level', 'health'}, 'creature')
@@ -113,7 +143,8 @@ def validate(scenario):
         number(creature.get('distance', 3), 'distance', 0, 100)
     if 'location' in scenario:
         location = scenario['location']
-        keys(location, {'map', 'x', 'y', 'z'}, {'map', 'x', 'y', 'z', 'o'}, 'location')
+        keys(location, {'map', 'x', 'y', 'z'}, {'map', 'x', 'y', 'z', 'o', 'ignore_access'}, 'location')
+        require(type(location.get('ignore_access', False)) is bool, 'ignore_access must be boolean')
         number(location['map'], 'map', 0, 2**32 - 1, True)
         for key in ('x', 'y', 'z'):
             number(location[key], key, -17000, 17000)
@@ -128,10 +159,13 @@ def validate(scenario):
         action = step['action']
         required, allowed = ACTIONS[action]
         keys(step, required | {'action'}, allowed | {'action', 'label'}, where)
-        if action == 'console':
+        if action in {'console', 'command'}:
             require(isinstance(step['command'], str) and step['command'].strip()
                     and '\n' not in step['command'] and '\r' not in step['command'],
-                    f'{where}: expected one console command')
+                    f'{where}: expected one command')
+            if action == 'command':
+                require(step['command'].startswith('.') and len(step['command']) > 1,
+                        f'{where}: player command must start with a dot')
         if 'actor' in step:
             require(step['actor'] in actor_ids, f'{where}: unknown actor')
             require(action in {'snapshot', 'assert'} or step['actor'] in player_ids,
@@ -139,28 +173,64 @@ def validate(scenario):
         for key in ('target', 'caster'):
             if key in step:
                 require(step[key] in actor_ids, f'{where}: unknown {key}')
-        for key in ('spell', 'item', 'talent', 'count'):
+        if 'destination' in step:
+            destination = step['destination']
+            keys(destination, {'x', 'y', 'z'}, {'x', 'y', 'z'}, f'{where}.destination')
+            for key in ('x', 'y', 'z'):
+                number(destination[key], f'{where}.destination.{key}', -17000, 17000)
+        for key in ('spell', 'item', 'talent', 'count', 'entry', 'quest'):
             if key in step:
                 number(step[key], f'{where}.{key}', 1, 2**31 - 1, True)
-        for key, maximum in (('rank', 4), ('effect', 2), ('slot', 18), ('power', 6)):
+        for key, maximum in (('rank', 4), ('effect', 2), ('slot', 18), ('power', 6), ('choice', 5),
+                             ('option', 2**32 - 1)):
             if key in step:
                 number(step[key], f'{where}.{key}', 0, maximum, True)
+        if 'stacks' in step:
+            number(step['stacks'], f'{where}.stacks', 0, 255, True)
+        for key in ('race_mask', 'class_mask'):
+            if key in step:
+                number(step[key], f'{where}.{key}', 0, 2**32 - 1, True)
+        if action == 'who' and 'target' in step:
+            require(step['target'] in player_ids, f'{where}: Who name filter needs a player')
         for key in ('ms', 'within_ms'):
             if key in step:
                 number(step[key], f'{where}.{key}', 0, scenario.get('timeout_ms', 90000), True)
+        if action == 'set_level':
+            number(step['value'], f'{where}.value', 1, 80, True)
         if 'value' in step:
             number(step['value'], f'{where}.value', 1 if action == 'set_health' else 0, 2**31 - 1, True)
         if action in {'snapshot', 'assert'}:
             metric = step['metric']
             require(metric in METRICS, f'{where}: unknown metric')
-            if metric.startswith('aura') or metric in {'knows_spell', 'cooldown_ms', 'has_talent'}:
+            if metric.startswith('aura') or metric in {
+                    'knows_spell', 'cooldown_ms', 'has_talent', 'pet_aura_stacks', 'charm_aura_stacks',
+                    'dynamic_object', 'dynamic_object_duration_ms', 'spell_power_cost',
+                    'spell_damage_done', 'spell_damage_taken'}:
                 require('spell' in step, f'{where}: metric needs spell')
+            if metric in {'spell_damage_done', 'melee_damage_done', 'spell_damage_taken', 'melee_damage_taken'}:
+                require('target' in step, f'{where}: damage metric needs target')
             if metric == 'item_count':
                 require('item' in step, f'{where}: metric needs item')
-            if metric in {'knows_spell', 'has_talent', 'talent_points', 'cooldown_ms', 'item_count'}:
+            if metric == 'quest_rewarded':
+                require('quest' in step, f'{where}: metric needs quest')
+            if metric == 'who_class':
+                require(step.get('target') in player_ids, f'{where}: Who class metric needs a target player')
+            if metric == 'owned_creature_count':
+                require('entry' in step, f'{where}: metric needs creature entry')
+                require('caster' not in step or 'spell' in step, f'{where}: aura caster filter needs spell')
+            if metric in {'knows_spell', 'has_talent', 'talent_points', 'cooldown_ms', 'item_count', 'bank_bag_slots',
+                          'pet_entry', 'pet_aura_stacks', 'owned_creature_count', 'charm_entry',
+                          'charm_aura_stacks', 'controls_self', 'private_instance',
+                          'dynamic_object', 'dynamic_object_duration_ms', 'gossip_options',
+                          'cast_speed_multiplier', 'spell_crit_chance', 'spell_power_cost',
+                          'spell_damage_done', 'melee_damage_done', 'spell_damage_taken', 'melee_damage_taken',
+                          'who_count', 'who_class',
+                          'loot_count', 'loot_entry', 'loot_received', 'quest_rewarded'}:
                 require(step['actor'] in player_ids, f'{where}: metric needs a player')
             if 'relative_to' in step:
                 require(snapshots.get(step['relative_to']) == metric, f'{where}: missing or incompatible snapshot')
+            if 'ratio_to' in step:
+                require(snapshots.get(step['ratio_to']) == metric, f'{where}: missing or incompatible ratio snapshot')
             if action == 'snapshot':
                 name = step['save_as']
                 require(isinstance(name, str) and ACTOR_ID.fullmatch(name), f'{where}: invalid snapshot name')
@@ -285,10 +355,10 @@ class Databases:
                 detail = detail.replace(connection.password, '[redacted]')
         return detail.strip()[-4000:]
 
-    def sql(self, role, statement):
+    def sql(self, role, statement, timeout=60):
         result = subprocess.run([self.mysql, f'--defaults-extra-file={self.option_files[role]}',
                                  '--batch', '--skip-column-names'], input=statement, text=True,
-                                capture_output=True, timeout=60, creationflags=CREATE_FLAGS)
+                                capture_output=True, timeout=timeout, creationflags=CREATE_FLAGS)
         if result.returncode:
             detail = self.redact(result.stderr)
             raise ValueError(f'MySQL operation failed for {role}: {detail or result.returncode}')
@@ -325,8 +395,8 @@ class Databases:
                         process.kill()
                         process.wait()
 
-    def prepare(self):
-        for role in ('auth', 'characters', 'world'):
+    def prepare(self, roles=('auth', 'characters', 'world')):
+        for role in roles:
             name = self.names[role]
             # CREATE without IF NOT EXISTS fails closed on collisions; only our creations are dropped.
             self.sql(role, f'CREATE DATABASE `{name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;')
@@ -428,7 +498,7 @@ def check_report(report, run_id, scenario, returncode):
             require(record.get('status') == 'completed', 'An action did not complete')
 
 
-def run_process(command, directory, ready_path, result_path, run_id, startup_timeout, timeout):
+def run_process(command, directory, ready_path, result_path, run_id, startup_timeout, timeout, on_ready=None):
     with (directory / 'worldserver.log').open('wb') as log:
         process = subprocess.Popen(command, cwd=directory, stdin=subprocess.PIPE, stdout=log, stderr=log,
                                    creationflags=CREATE_FLAGS)
@@ -441,7 +511,9 @@ def run_process(command, directory, ready_path, result_path, run_id, startup_tim
                     ready = read_json(ready_path)
                     require(ready.get('run_id') == run_id and ready.get('status') == 'ready',
                             'Invalid readiness record')
-                    ready_at = now
+                    if on_ready:
+                        on_ready(ready)
+                    ready_at = time.monotonic()
                     print('Worldserver harness is ready; executing scenario...', flush=True)
                 if ready_at is None:
                     require(now - start < startup_timeout, 'Worldserver/harness readiness timed out')
@@ -451,6 +523,7 @@ def run_process(command, directory, ready_path, result_path, run_id, startup_tim
             require(result_path.exists(), 'Worldserver exited without a result; check the build and server log')
             report = read_json(result_path)
             if report.get('status') == 'passed':
+                require(on_ready is None or ready_at is not None, 'Startup barrier was not observed')
                 require(ready_path.exists(), 'Successful result is missing harness readiness')
                 ready = read_json(ready_path)
                 require(ready.get('run_id') == run_id and ready.get('status') == 'ready', 'Invalid readiness record')
@@ -477,6 +550,7 @@ def sha256(path):
 
 
 def execute(args, scenario):
+    started = time.monotonic()
     binary = args.worldserver.resolve(strict=True)
     source_config = args.config.resolve(strict=True)
     mysql = args.mysql.resolve(strict=True)
@@ -497,6 +571,7 @@ def execute(args, scenario):
     print(f'Run {run_id}: {output}', flush=True)
     generated_config = output / 'worldserver.conf'
     module_configs = []
+    cache = None
     retain_databases = False
     summary = {'schema': 1, 'run_id': run_id, 'scenario': scenario['name'], 'status': 'failed',
                'binary_sha256': sha256(binary), 'scenario_sha256': sha256(scenario_path),
@@ -504,7 +579,16 @@ def execute(args, scenario):
     database = Databases(mysql, dump, output, connections, run_id)
     summary['databases'] = database.names
     try:
-        database.prepare()
+        module_source = args.modules_config_dir or source_config.parent / 'modules'
+        if not args.fresh_databases:
+            cache = WorldCache(database, args.world_cache_dir.resolve(),
+                               input_fingerprint(ROOT, source_config, module_source))
+            summary['world_cache'] = cache.info
+            cache.prepare(refresh=args.refresh_world)
+        else:
+            summary['world_cache'] = {'mode': 'fresh', 'retained': False}
+        database.prepare(roles=('auth', 'characters') if cache else ('auth', 'characters', 'world'))
+        summary['database_prepare_seconds'] = round(time.monotonic() - started, 3)
         data_dir = Path(config.get('DataDir', '.'))
         if not data_dir.is_absolute():
             data_dir = binary.parent / data_dir
@@ -518,17 +602,21 @@ def execute(args, scenario):
             'Warden.Enabled': 0, 'Network.UseSocketActivation': 0,
             'LoginDatabase.WorkerThreads': 1, 'CharacterDatabase.WorkerThreads': 1,
             'Updates.EnableDatabases': 7, 'CoAGameplayTest.Enable': 1, 'CoAGameplayTest.RunId': run_id,
+            'CoAGameplayTest.WorldDatabaseId': cache.metadata['world_id'] if cache else run_id,
+            'CoAGameplayTest.StartFile': (output / 'start.json').as_posix() if cache else '',
             'CoAGameplayTest.ScenarioFile': scenario_path.as_posix(),
             'CoAGameplayTest.ReadyFile': ready_path.as_posix(),
             'CoAGameplayTest.ResultFile': result_path.as_posix(),
         }
-        module_source = args.modules_config_dir or source_config.parent / 'modules'
         module_configs = stage_modules(module_source, output, set(overrides))
         summary['module_config_sha256'] = {path.name: sha256(path) for path in module_configs}
         write_config(source_config, generated_config, overrides)
+        server_started = time.monotonic()
+        on_ready = (lambda record: cache.ready(record, output / 'start.json', run_id)) if cache else None
         report, returncode = run_process([str(binary), '-c', str(generated_config)], output, ready_path,
                                          result_path, run_id, args.startup_timeout,
-                                         scenario.get('timeout_ms', 90000) / 1000 + 30)
+                                         scenario.get('timeout_ms', 90000) / 1000 + 30, on_ready=on_ready)
+        summary['server_seconds'] = round(time.monotonic() - server_started, 3)
         check_report(report, run_id, scenario, returncode)
         summary.update(status='passed', assertions=int(report['assertions']))
     except ServerStillRunning as error:
@@ -538,12 +626,19 @@ def execute(args, scenario):
         summary['message'] = str(error)
     finally:
         failures = list(database.names.values()) if retain_databases else database.cleanup()
+        if cache:
+            try:
+                cache.finish(server_still_running=retain_databases)
+            except (ValueError, OSError, subprocess.SubprocessError, KeyError) as error:
+                summary['cache_cleanup_error'] = str(error)
+                failures.append(database.names['world'])
         if failures:
             summary.update(status='failed', cleanup_failed=failures)
         generated_config.unlink(missing_ok=True)
         for path in module_configs:
             path.unlink(missing_ok=True)
         database.remove_credentials()
+        summary['total_seconds'] = round(time.monotonic() - started, 3)
         (output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n', encoding='utf-8')
     print(f"{summary['status'].upper()}: {scenario['name']}\nResults: {output}")
     if 'message' in summary:
@@ -556,7 +651,7 @@ def main(argv=None):
     subparsers = parser.add_subparsers(dest='command', required=True)
     check = subparsers.add_parser('validate', help='Validate a scenario without starting a server')
     check.add_argument('scenario', type=Path)
-    run = subparsers.add_parser('run', help='Clone local test DBs, run a scenario, and clean up')
+    run = subparsers.add_parser('run', help='Prepare isolated test DBs, run a scenario, and clean up')
     run.add_argument('scenario', type=Path)
     run.add_argument('--worldserver', type=Path, required=True)
     run.add_argument('--config', type=Path, required=True, help='Source worldserver config; never changed')
@@ -567,6 +662,11 @@ def main(argv=None):
     run.add_argument('--modules-config-dir', type=Path, help='Defaults to the source config directory/modules')
     run.add_argument('--output', type=Path, help='New directory for logs and results')
     run.add_argument('--startup-timeout', type=float, default=600)
+    mode = run.add_mutually_exclusive_group()
+    mode.add_argument('--fresh-databases', action='store_true', help='Use disposable copies without the world cache')
+    mode.add_argument('--refresh-world', action='store_true', help='Replace the owned world cache before this run')
+    run.add_argument('--world-cache-dir', type=Path, default=ROOT / '.cache/coa-gameplay-tests/world-cache',
+                     help='Local cache metadata/lease directory; database ownership is verified separately')
     args = parser.parse_args(argv)
     try:
         scenario = validate(read_json(args.scenario))

@@ -7,7 +7,8 @@
 # Enable the compatibility packet filter.
 AscensionCompat.Enable = 1
 
-# Apply the Ascension protocol settings to remote connections as well as loopback.
+# Apply the Ascension protocol settings to remote connections as well as loopback
+# (world headers, extension opcodes, ping interval, spell-modifier layout, class-10 mapping).
 # Enable only on realms dedicated to the matching Ascension client build.
 # Authentication proofs and packet size checks remain required. Restart to apply.
 AscensionCompat.AllowRemoteClients = 0
@@ -22,6 +23,17 @@ AscensionCompat.MapClass10ToWarrior = 1
 
 # Log each consumed extension packet during protocol discovery.
 AscensionCompat.LogConsumedPackets = 1
+
+# Ascension character screen: enable/disable (activate/deactivate) and the
+# per-account character list sort order.
+# Requests: CMSG 0x072E / 0x072F / 0x0772.
+# Responses: SMSG 0x075E / 0x075F / 0x0760 / 0x076F / 0x0770 / 0x0771.
+AscensionCompat.CharacterSelectionEnable = 1
+
+# Maximum simultaneously active characters per account (1-128).
+# Deactivated characters stay stored, are hidden from the standard character
+# list and can be re-activated later.
+AscensionCompat.CharacterSelectionMaxActive = 10
 
 # Directory containing the custom client DBCs used by the collection protocol.
 # Required files: Appearances.dbc, ItemAppearances.dbc, VanityCollection.dbc.

@@ -34,6 +34,7 @@
 #include "SharedDefines.h"
 #include "World.h"
 #include <atomic>
+#include <functional>
 #include <map>
 #include <memory>
 #include <utility>
@@ -441,6 +442,11 @@ public:
     bool ProcessMovementInfo(MovementInfo& movementInfo, Unit* mover, Player* plrMover, WorldPacket& recvData);
 
     void SendPacket(WorldPacket const* packet);
+    // Socketless integration tests can observe native responses without opening a client connection.
+    void SetSocketlessPacketObserver(std::function<void(WorldPacket const&)> observer)
+    {
+        _socketlessPacketObserver = std::move(observer);
+    }
     void SendPetNameInvalid(uint32 error, std::string const& name, DeclinedName* declinedName);
     void SendPartyResult(PartyOperation operation, std::string const& member, PartyResult res, uint32 val = 0);
 
@@ -488,6 +494,11 @@ public:
     ObjectGuid::LowType GetGuidLow() const;
     void SetSecurity(AccountTypes security) { _security = security; }
     std::string const& GetRemoteAddress() { return m_Address; }
+
+    // Set by WorldSocket: the connection uses the Ascension client protocol
+    // (loopback or AscensionCompat.AllowRemoteClients, and AscensionCompat.Enable).
+    bool IsAscensionCompatEnabled() const { return _ascensionCompatEnabled; }
+    void SetAscensionCompatEnabled(bool enabled) { _ascensionCompatEnabled = enabled; }
     void SetPlayer(Player* player);
     uint8 Expansion() const { return m_expansion; }
 
@@ -1273,7 +1284,9 @@ private:
     ObjectGuid::LowType m_GUIDLow;                     // set logined or recently logout player (while m_playerRecentlyLogout set)
     Player* _player;
     std::shared_ptr<WorldSocket> m_Socket;
+    std::function<void(WorldPacket const&)> _socketlessPacketObserver;
     std::string m_Address;
+    bool _ascensionCompatEnabled = false;
 
     AccountTypes _security;
     bool _skipQueue;

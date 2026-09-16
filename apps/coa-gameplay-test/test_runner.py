@@ -41,13 +41,72 @@ class RunnerTests(unittest.TestCase):
             lambda s: s.update(schema=True),
             lambda s: s.update(timeout_ms=float('inf')),
             lambda s: s['players'][0].update(level=True),
+            lambda s: s['steps'].append({'action': 'set_level', 'actor': 'caster', 'value': 0}),
+            lambda s: s['steps'].append({'action': 'set_level', 'actor': 'caster', 'value': 81}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'caster',
+                                         'metric': 'spell_damage_done', 'spell': 686, 'equals': 1000}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'caster',
+                                         'metric': 'spell_damage_done', 'target': 'target', 'equals': 1000}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'caster',
+                                         'metric': 'melee_damage_done', 'target': 'missing', 'equals': 1000}),
             lambda s: s['players'][0].update(race=0),
+            lambda s: s['players'][0].update(ranged_hit_rating=-1),
+            lambda s: s['players'][0].update(melee_hit_rating=-1),
+            lambda s: s['players'][0].update(expertise_rating=True),
+            lambda s: s['players'][0].update(spell_crit_rating=-1),
+            lambda s: s['steps'].append({'action': 'who', 'actor': 'caster', 'class_mask': 2**32}),
+            lambda s: s['steps'].append({'action': 'who', 'actor': 'caster', 'target': 'target'}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'caster', 'metric': 'who_class', 'equals': 1}),
+            lambda s: s['steps'].append({'action': 'open_item', 'actor': 'caster'}),
+            lambda s: s['steps'].append({'action': 'prepare_quest', 'actor': 'caster', 'quest': 0}),
+            lambda s: s['steps'].append({'action': 'reward_quest', 'actor': 'caster', 'quest': 1518, 'choice': 6}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'caster', 'metric': 'quest_rewarded', 'equals': 1}),
+            lambda s: s['steps'].append({'action': 'login_hooks', 'actor': 'target'}),
+            lambda s: s['steps'].append({'action': 'collect_loot', 'actor': 'target'}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'target', 'metric': 'loot_count', 'equals': 1}),
             lambda s: s['creatures'][0].update(id='caster'),
             lambda s: s['steps'].append({'action': 'cast', 'actor': 'caster', 'spell': 116, 'target': 'missing'}),
+            lambda s: s.update(location={'map': 33, 'x': 0, 'y': 0, 'z': 0, 'ignore_access': 1}),
+            lambda s: s['steps'].append({'action': 'cast', 'actor': 'caster', 'spell': 502329,
+                                         'destination': {'x': 0, 'y': 0}}),
+            lambda s: s['steps'].append({'action': 'cast', 'actor': 'caster', 'spell': 502329,
+                                         'destination': {'x': float('nan'), 'y': 0, 'z': 0}}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'target', 'metric': 'dynamic_object',
+                                         'spell': 502329, 'equals': 1}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'caster', 'metric': 'dynamic_object',
+                                         'equals': 1}),
+            lambda s: s['steps'].append({'action': 'cast_charm', 'actor': 'target', 'spell': 802176}),
+            lambda s: s['steps'].append({'action': 'gossip_hello', 'actor': 'caster', 'target': 'missing'}),
+            lambda s: s['steps'].append({'action': 'attack', 'actor': 'caster'}),
+            lambda s: s['steps'].append({'action': 'attack', 'actor': 'caster', 'target': 'missing'}),
+            lambda s: s['steps'].append({'action': 'gossip_select', 'actor': 'caster', 'option': -1}),
+            lambda s: s['steps'].append({'action': 'set_aura', 'actor': 'caster', 'spell': 803102, 'stacks': 256}),
+            lambda s: s['steps'].append({'action': 'set_aura', 'actor': 'target', 'spell': 803102, 'stacks': 1}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'caster', 'metric': 'spell_power_cost',
+                                         'equals': 0}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'caster', 'metric': 'health',
+                                         'ratio_to': 'missing', 'equals': 1}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'target', 'metric': 'gossip_options',
+                                         'equals': 1}),
             lambda s: s['steps'].append({'action': 'assert', 'actor': 'target', 'metric': 'health', 'equlas': 0}),
             lambda s: s['steps'].append({'action': 'assert', 'actor': 'target', 'metric': 'health',
                                          'equals': float('nan')}),
             lambda s: s['steps'].append({'action': 'set_power', 'actor': 'caster', 'value': 1, 'power': 7}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'target', 'metric': 'pet_entry', 'equals': 0}),
+            lambda s: s['steps'].append({'action': 'command', 'actor': 'target', 'command': '.manastorm enter 1'}),
+            lambda s: s['steps'].append({'action': 'command', 'actor': 'caster', 'command': 'manastorm enter 1'}),
+            lambda s: s['steps'].append({'action': 'command', 'actor': 'caster', 'command': '.a\n.b'}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'target', 'metric': 'charm_entry', 'equals': 0}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'caster', 'metric': 'charm_aura_stacks',
+                                         'equals': 0}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'caster', 'metric': 'pet_aura_stacks',
+                                         'equals': 0}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'caster', 'metric': 'owned_creature_count',
+                                         'equals': 0}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'target', 'metric': 'owned_creature_count',
+                                         'entry': 36, 'equals': 0}),
+            lambda s: s['steps'].append({'action': 'assert', 'actor': 'caster', 'metric': 'owned_creature_count',
+                                         'entry': 36, 'caster': 'caster', 'equals': 0}),
             lambda s: s.update(steps=[{'action': 'wait', 'ms': 1}]),
             lambda s: s['steps'].insert(0, {'action': 'assert', 'actor': 'target', 'metric': 'health',
                                            'relative_to': 'missing', 'equals': 0}),
@@ -210,6 +269,27 @@ class RunnerTests(unittest.TestCase):
     def test_success_without_readiness_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'missing harness readiness'):
             self.fake_process(f'Path("result.json").write_text({json.dumps(json.dumps(self.report()))})\n')
+
+    def test_ready_callback_releases_waiting_child_before_scenario(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            script = directory / 'fake_server.py'
+            script.write_text(
+                'from pathlib import Path\nimport time\n'
+                'Path("ready.json").write_text(\'{"status":"ready","run_id":"012345abcdef"}\')\n'
+                'while not Path("start.json").exists():\n    time.sleep(0.01)\n'
+                f'Path("result.json").write_text({json.dumps(json.dumps(self.report()))})\n', encoding='utf-8')
+            observed = []
+
+            def release(record):
+                self.assertFalse((directory / 'result.json').exists())
+                observed.append(record['run_id'])
+                (directory / 'start.json').write_text('{}')
+
+            report, returncode = run.run_process([sys.executable, str(script)], directory, directory / 'ready.json',
+                                                 directory / 'result.json', '012345abcdef', 3, 3, on_ready=release)
+            run.check_report(report, '012345abcdef', self.scenario, returncode)
+            self.assertEqual(observed, ['012345abcdef'])
 
 
 if __name__ == '__main__':

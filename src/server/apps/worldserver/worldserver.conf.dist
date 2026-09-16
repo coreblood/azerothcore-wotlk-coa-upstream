@@ -2016,15 +2016,19 @@ CharacterCreating.Disabled.ClassMask = 0
 #    CharactersPerAccount
 #        Description: Limit number of characters per account on all realms on this realmlist.
 #        Important:   Number must be >= CharactersPerRealm
-#        Default:     50
+#        Default:     128
 
-CharactersPerAccount = 50
+CharactersPerAccount = 128
 
 #
 #    CharactersPerRealm
 #        Description: Limit number of characters per account on this realm.
-#        Range:       1-10
-#        Default:     10 - (Client limitation)
+#                     Only active characters count; deactivated ones keep their
+#                     data without holding a slot. The Ascension character screen
+#                     also hides its create button while this many characters are
+#                     active, so one free slot is needed to create another.
+#        Range:       1-128
+#        Default:     10
 
 CharactersPerRealm = 10
 

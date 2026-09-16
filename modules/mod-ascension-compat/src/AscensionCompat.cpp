@@ -13,6 +13,7 @@
 #include "AllCreatureScript.h"
 #include "AllSpellScript.h"
 #include "AscensionChangelogCompat.h"
+#include "AscensionCharacterSelection.h"
 #include "AscensionManastorm.h"
 #include "AscensionClassMechanics.h"
 #include "AscensionClassMechanics19To25.h"
@@ -24,6 +25,7 @@
 #include "AscensionCollectibleSpellData.h"
 #include "AscensionCustomClassData.h"
 #include "AscensionAuraAmounts.h"
+#include "AscensionClassTuning.h"
 #include "AscensionBarbarian.h"
 #include "AscensionBarbarianScaling.h"
 #include "AscensionCustomResourceData.h"
@@ -62,6 +64,7 @@
 #include "ObjectMgr.h"
 #include "Opcodes.h"
 #include "Player.h"
+#include "QuestDef.h"
 #include "Random.h"
 #include "ScriptMgr.h"
 #include "ScriptedGossip.h"
@@ -97,6 +100,7 @@ using namespace Acore::ChatCommands;
 namespace {
 constexpr uint16 CMSG_ANTICHEAT_ALERT = 0x051F;
 constexpr uint16 CMSG_VANITY_DELIVERY = 0x0523;
+constexpr uint16 CMSG_CREATURE_ASSET_QUERY_MULTIPLE = 0x061A;
 constexpr uint16 CMSG_APPLY_APPEARANCES = 0x0697;
 constexpr uint16 SMSG_APPLY_APPEARANCES_RESULT = 0x0698;
 constexpr uint16 SMSG_APPEARANCE_COLLECTION_INFO = 0x0699;
@@ -117,6 +121,8 @@ constexpr uint32 SPELL_STORMBRINGER_STATIC = 803102;
 constexpr uint32 SPELL_STORMBRINGER_CHARGED_CONDUIT = 803790;
 constexpr uint32 SPELL_REAPER_REAPED_SOUL = 500363;
 constexpr uint32 SPELL_REAPER_SOUL_INFUSION = 803031;
+// Removes Reaped Souls, Soul Infusion and Soul Fragments; Soul Infusion's own proc trigger points to it.
+constexpr uint32 SPELL_REAPER_SOUL_INFUSION_REMOVER = 561290;
 constexpr uint32 SPELL_REAPER_SOUL_FRAGMENT = 805077;
 constexpr uint32 SPELL_REAPER_GENERATE_SOUL = 805078;
 constexpr char ASCENSION_LOCAL_RESOURCE_PREFIX[] = "ASC_LOCAL_RESOURCE";
@@ -243,6 +249,7 @@ struct AppearanceInfo {
   uint32 SecondaryCategory = 0;
   uint32 TertiaryCategory = 0;
   uint32 EnchantId = 0;
+  uint32 CosmeticSpell = 0;
 };
 
 struct VanityInfo {
@@ -265,6 +272,8 @@ struct PlayerCollectionState {
   uint32 CompanionSpellTimer = 0;
   uint32 CompanionLootTimer = 0;
   uint32 CompanionSkinningTimer = 0;
+  uint32 CosmeticTimer = 0;
+  std::unordered_set<uint32> AppliedCosmeticSpells;
   bool CanSeeItemAppearances = true;
   bool CanSeeSpellAppearances = true;
 };
@@ -380,6 +389,50 @@ bool IsAscensionCustomClass(Player const *player) {
   return playerClass >= CLASS_BARBARIAN && playerClass <= CLASS_SPIRIT_MAGE;
 }
 
+enum LegacyQuestSpells : uint32
+{
+    QuestStoneskinTotem = 8073,
+    QuestPathOfDefense = 8121,
+    LegacyDefensiveStance = 1100071,
+    LegacyTaunt = 1100355,
+    LegacySunderArmor = 1107386,
+    LegacyStoneskinTotem = 1108071
+};
+
+struct LegacyQuestReward
+{
+    uint32 Wrapper;
+    std::array<uint32, MAX_SPELL_EFFECTS> Spells;
+};
+
+constexpr std::array<LegacyQuestReward, 2> LegacyQuestRewards = {{
+    {QuestStoneskinTotem, {LegacyStoneskinTotem, 0, 0}},
+    {QuestPathOfDefense, {LegacyDefensiveStance, LegacySunderArmor, LegacyTaunt}}
+}};
+
+LegacyQuestReward const* GetLegacyQuestReward(uint32 wrapper)
+{
+    for (LegacyQuestReward const& reward : LegacyQuestRewards)
+        if (reward.Wrapper == wrapper)
+            return &reward;
+    return nullptr;
+}
+
+void RemoveLegacyQuestSpells(Player* player)
+{
+    if (!IsAscensionCustomClass(player))
+        return;
+
+    // Only repair the known class-quest grants, with evidence of the corresponding rewarded quest.
+    // Do not infer ownership from absence in the generated custom-class spell catalogs.
+    for (uint32 questId : player->getRewardedQuests())
+        if (Quest const* quest = sObjectMgr->GetQuestTemplate(questId))
+            if (LegacyQuestReward const* reward = GetLegacyQuestReward(quest->GetRewSpellCast()))
+                for (uint32 spell : reward->Spells)
+                    if (spell)
+                        player->removeSpell(spell, SPEC_MASK_ALL, false);
+}
+
 AscensionCompatData::StarterKit const *GetStarterKit(uint8 playerClass) {
   auto itr = std::find_if(
       AscensionCompatData::StarterKits.begin(),
@@ -433,6 +486,7 @@ public:
     // grants. Do not scan arbitrary quest, collection or purchased spells for
     // absence from a level-one snapshot. Valid selected talents are independent.
     uint32 const activeSpec = GetActiveSpecialization(player);
+    AscensionClassTuning::Synchronize(player, activeSpec, true);
     auto const racialSpells = GetAscensionRacialSpells(player);
     auto selectedTalentOwns = [player, activeSpec](uint32 spellId)
     {
@@ -1176,7 +1230,24 @@ public:
     return true;
   }
 
+    void UpdateClassTuning(Player* player, uint32 diff)
+    {
+        if (!IsAscensionCustomClass(player))
+            return;
+
+        uint32& remaining = _tuningUpdates[player->GetGUID()];
+        if (diff < remaining)
+        {
+            remaining -= diff;
+            return;
+        }
+
+        remaining = 1000;
+        AscensionClassTuning::Synchronize(player, GetActiveSpecialization(player), false);
+    }
+
   void OnPlayerLogout(Player *player) {
+    _tuningUpdates.erase(player->GetGUID());
     _activeSpecializations.erase(player->GetGUID().GetCounter());
     _proficiencySynchronizations.erase(player->GetGUID().GetCounter());
   }
@@ -1300,6 +1371,7 @@ private:
         return learned;
     }
 
+  std::unordered_map<ObjectGuid, uint32> _tuningUpdates;
   std::unordered_map<uint32, uint32> _activeSpecializations;
   std::unordered_set<uint32> _proficiencySynchronizations;
 };
@@ -1469,6 +1541,7 @@ public:
     void OnPlayerLogin(Player* player) const
     {
         _lastClientResourceStates.erase(player->GetGUID().GetCounter());
+        _staticDecayTimers.erase(player->GetGUID());
         if (IsAscensionCustomClass(player))
         {
             SynchronizeThresholdResources(player);
@@ -1476,10 +1549,11 @@ public:
         }
     }
 
-    void OnPlayerUpdate(Player* player) const
+    void OnPlayerUpdate(Player* player, uint32 diff) const
     {
         if (IsAscensionCustomClass(player))
         {
+            DecayStatic(player, diff);
             SynchronizeThresholdResources(player);
             SendClientState(player, false);
         }
@@ -1488,7 +1562,10 @@ public:
     void OnPlayerLogout(Player* player) const
     {
         if (player)
+        {
             _lastClientResourceStates.erase(player->GetGUID().GetCounter());
+            _staticDecayTimers.erase(player->GetGUID());
+        }
     }
 
     [[nodiscard]] bool CanPrepare(Spell* spell) const
@@ -2070,6 +2147,14 @@ private:
             return;
         }
 
+        // Abilities that require Soul Infusion consume it together with the souls that granted it.
+        if (spellInfo->CasterAuraSpell == SPELL_REAPER_SOUL_INFUSION &&
+            player->HasAura(SPELL_REAPER_SOUL_INFUSION))
+        {
+            player->CastSpell(player, SPELL_REAPER_SOUL_INFUSION_REMOVER, true);
+            return;
+        }
+
         for (std::pair<uint32, uint32> const& range :
              REAPER_ONE_SOUL_CONSUMERS)
         {
@@ -2079,6 +2164,35 @@ private:
                 return;
             }
         }
+    }
+
+    void DecayStatic(Player* player, uint32 diff) const
+    {
+        ObjectGuid const guid = player->GetGUID();
+        uint8 const stacks = GetAuraStacks(player, SPELL_STORMBRINGER_STATIC);
+        if (player->getClass() != CLASS_STORMBRINGER || !player->IsAlive() || !stacks || player->IsInCombat())
+        {
+            _staticDecayTimers.erase(guid);
+            return;
+        }
+
+        // Preserve Static for five seconds out of combat, then lose one per second.
+        // The rate is a local tuning choice; the archived changelog only establishes the grace period.
+        constexpr uint32 graceMs = 5000;
+        constexpr uint32 intervalMs = 1000;
+        uint32& timer = _staticDecayTimers[guid];
+        uint64 const elapsed = uint64(timer) + diff;
+        if (elapsed < graceMs + intervalMs)
+        {
+            timer = uint32(elapsed);
+            return;
+        }
+
+        uint32 const loss = uint32(std::min<uint64>(stacks, (elapsed - graceMs) / intervalMs));
+        timer = graceMs + uint32((elapsed - graceMs) % intervalMs);
+        ModifyAuraStacks(player, SPELL_STORMBRINGER_STATIC, -int32(loss));
+        if (loss == stacks)
+            _staticDecayTimers.erase(guid);
     }
 
     static void SynchronizeThresholdResources(Player* player)
@@ -2135,10 +2249,50 @@ private:
     }
 
     mutable std::unordered_map<uint32, uint64> _lastClientResourceStates;
+    mutable std::unordered_map<ObjectGuid, uint32> _staticDecayTimers;
 };
 
 class AscensionCollectionService {
 public:
+    static bool IsCosmeticCategory(uint32 category)
+    {
+        return category >= 56 && category <= 58;
+    }
+
+    static uint32 ResolveCosmeticSpell(uint32 appearance, uint32 display, uint32 alternate)
+    {
+        // These three catalog entries have no usable spell in the supplied client data.
+        if (appearance == 2992 || appearance == 51444 || appearance == 52428)
+            return 0;
+        if (appearance == 2714)
+            display = 985235; // Noir Clockwork Steam Engine
+        if (appearance == 42965)
+            display = 935566; // Scribe's Noble Parchment Pouch
+        if (!sSpellMgr->GetSpellInfo(display))
+            display = alternate;
+
+        std::unordered_set<uint32> visited;
+        while (display && visited.insert(display).second && visited.size() <= 8)
+        {
+            SpellInfo const* spell = sSpellMgr->GetSpellInfo(display);
+            if (!spell || spell->Effects[EFFECT_1].Effect || spell->Effects[EFFECT_2].Effect)
+                return 0;
+            SpellEffectInfo const& effect = spell->Effects[EFFECT_0];
+            if (effect.Effect == SPELL_EFFECT_TRIGGER_SPELL)
+            {
+                display = effect.TriggerSpell;
+                continue;
+            }
+            // Follow cosmetic wrappers without casting their gameplay effects or implicit targets.
+            if (effect.IsAura() && (effect.ApplyAuraName == SPELL_AURA_DUMMY ||
+                effect.ApplyAuraName == SPELL_AURA_MOD_SCALE ||
+                (display == 1985213 && effect.ApplyAuraName == SPELL_AURA_PROC_TRIGGER_SPELL)))
+                return display;
+            return 0;
+        }
+        return 0;
+    }
+
   static AscensionCollectionService &Instance() {
     static AscensionCollectionService instance;
     return instance;
@@ -2153,7 +2307,7 @@ public:
     _allVanityItemIds.clear();
 
     bool appearancesLoaded =
-        ForEachWdbcRecord(dbcDirectory / "Appearances.dbc", 8,
+        ForEachWdbcRecord(dbcDirectory / "Appearances.dbc", 9,
                           [this](std::vector<uint8> const &record) {
                             uint32 appearanceId = ReadRecordField(record, 0);
                             if (!appearanceId)
@@ -2164,6 +2318,10 @@ public:
                                 displayId, ReadRecordField(record, 5),
                                 ReadRecordField(record, 6),
                                 ReadRecordField(record, 7), displayId};
+                            AppearanceInfo& appearance = _appearances[appearanceId];
+                            if (IsCosmeticCategory(appearance.PrimaryCategory))
+                                appearance.CosmeticSpell = ResolveCosmeticSpell(appearanceId,
+                                    displayId, ReadRecordField(record, 8));
                             _allAppearanceIds.push_back(appearanceId);
                           });
 
@@ -2276,6 +2434,11 @@ public:
     SendAppearanceVisibility(player, *state);
     SendVanityCollection(player, *state);
     RefreshVisibleItems(player);
+    // Reconcile any aura saved by an older session against the authoritative wardrobe selection.
+    for (auto const& [id, appearance] : _appearances)
+        if (appearance.CosmeticSpell)
+            player->RemoveAurasDueToSpell(appearance.CosmeticSpell, player->GetGUID());
+    RefreshCosmetics(player, *state);
     InitializeRiding(player);
     QueueOwnedCompanionSpells(player, *state);
 
@@ -2316,16 +2479,43 @@ public:
     ProcessPendingCompanionSpells(player, diff);
     ProcessCompanionLoot(player, diff);
     ProcessCompanionLoot(player, diff, true);
+    if (auto state = GetState(player))
+    {
+        if (state->CosmeticTimer <= diff)
+        {
+            state->CosmeticTimer = 1000;
+            RefreshCosmetics(player, *state);
+        }
+        else
+            state->CosmeticTimer -= diff;
+    }
   }
 
     void ProcessCompanionLoot(Player* player, uint32 diff, bool skin = false)
     {
+        constexpr uint32 CREATURE_LOOTBOT_3000 = 44022;
         uint32 const category = skin ? APPEARANCE_CATEGORY_COMPANION_SKINNING : APPEARANCE_CATEGORY_COMPANION_LOOT;
         uint32 const appearance = skin ? APPEARANCE_SKIN_PEELER : APPEARANCE_LOOT_TRANSFIGURATOR;
         auto state = GetState(player);
-        if (!state || state->ActiveAppearances[category] != appearance ||
-            !state->CollectedAppearances.contains(appearance))
+        if (!state)
             return;
+
+        bool const hasAppearance = state->ActiveAppearances[category] == appearance &&
+            state->CollectedAppearances.contains(appearance);
+
+        // Lootbot 3000 grants auto-loot when summoned without requiring the appearance collected.
+        // It does not provide skinning.
+        bool isLootbot = false;
+        if (!skin && !hasAppearance)
+        {
+            Creature* c = player->GetMap()->GetCreature(player->GetCritterGUID());
+            isLootbot = c && c->IsAlive() && c->GetOwnerGUID() == player->GetGUID() &&
+                        c->GetEntry() == CREATURE_LOOTBOT_3000;
+        }
+
+        if (!hasAppearance && !isLootbot)
+            return;
+
         uint32& timer = skin ? state->CompanionSkinningTimer : state->CompanionLootTimer;
         if (timer > diff)
         {
@@ -2380,8 +2570,14 @@ public:
         for (uint32 spellId : spells)
         {
             player->learnSpell(spellId, false);
-            if (player->HasSpell(spellId))
-                ++learned;
+            if (!player->HasSpell(spellId))
+                continue;
+
+            // The grant lands inside the login window, so Player::_addSpell records it as PLAYERSPELL_UNCHANGED
+            // and Player::_SaveSpells skips it. Without a character_spell row the next login validates the saved
+            // action buttons before this hook runs, so mount and companion buttons are dropped and deleted.
+            player->MarkSpellForSave(spellId);
+            ++learned;
         }
 
         if (learned)
@@ -2548,11 +2744,18 @@ public:
       }
 
       AppearanceInfo const &appearance = appearanceItr->second;
-      if ((categoryId <= 14 || categoryId == APPEARANCE_CATEGORY_AMMUNITION) &&
+      if ((categoryId <= 14 || categoryId == APPEARANCE_CATEGORY_AMMUNITION ||
+          IsCosmeticCategory(categoryId)) &&
           appearance.PrimaryCategory != categoryId &&
           appearance.SecondaryCategory != categoryId &&
           appearance.TertiaryCategory != categoryId) {
         SendApplyResult(player, "APPLY_APPEARANCES_INVALID_CATEGORY");
+        return;
+      }
+
+      if (IsCosmeticCategory(categoryId) && !appearance.CosmeticSpell)
+      {
+        SendApplyResult(player, "APPLY_APPEARANCES_INVALID_SELECTION");
         return;
       }
 
@@ -2565,6 +2768,7 @@ public:
 
     state->ActiveAppearances[categoryId] = appearanceId;
     SaveActiveAppearances(player, *state);
+    RefreshCosmetics(player, *state);
     RefreshVisibleItems(player);
     SendActiveAppearances(player, *state);
     SendApplyResult(player, "APPLY_APPEARANCES_OK");
@@ -2959,11 +3163,17 @@ private:
       }
 
       AppearanceInfo const &appearance = appearanceItr->second;
-      if ((categoryId <= 14 || categoryId == APPEARANCE_CATEGORY_AMMUNITION) &&
+      if ((categoryId <= 14 || categoryId == APPEARANCE_CATEGORY_AMMUNITION ||
+          IsCosmeticCategory(categoryId)) &&
           appearance.PrimaryCategory != categoryId &&
           appearance.SecondaryCategory != categoryId &&
           appearance.TertiaryCategory != categoryId) {
         SendApplyResult(player, "APPLY_APPEARANCES_INVALID_CATEGORY");
+        return;
+      }
+      if (IsCosmeticCategory(categoryId) && !appearance.CosmeticSpell)
+      {
+        SendApplyResult(player, "APPLY_APPEARANCES_INVALID_SELECTION");
         return;
       }
     }
@@ -2976,6 +3186,7 @@ private:
 
     state->ActiveAppearances = requested;
     SaveActiveAppearances(player, *state);
+    RefreshCosmetics(player, *state);
     RefreshVisibleItems(player);
     SendApplyResult(player, "APPLY_APPEARANCES_OK");
   }
@@ -3115,6 +3326,35 @@ private:
     player->GetSession()->SendPacket(&packet);
   }
 
+    void RefreshCosmetics(Player* player, PlayerCollectionState& state)
+    {
+        std::unordered_set<uint32> desired;
+        for (uint32 category = 56; category <= 58; ++category)
+        {
+            uint32 id = state.ActiveAppearances[category];
+            auto itr = _appearances.find(id);
+            if (state.CollectedAppearances.contains(id) && itr != _appearances.end() &&
+                itr->second.CosmeticSpell)
+                desired.insert(itr->second.CosmeticSpell);
+        }
+        for (uint32 spell : state.AppliedCosmeticSpells)
+            if (!desired.contains(spell))
+                player->RemoveAurasDueToSpell(spell, player->GetGUID());
+        state.AppliedCosmeticSpells = std::move(desired);
+        if (!player->IsAlive())
+            return;
+        for (uint32 spell : state.AppliedCosmeticSpells)
+        {
+            if (!player->HasAura(spell, player->GetGUID()))
+                if (Aura* aura = player->AddAura(spell, player))
+                {
+                    // A selected wardrobe cosmetic lasts until removed, including finite source effects.
+                    aura->SetMaxDuration(-1);
+                    aura->SetDuration(-1);
+                }
+        }
+    }
+
   void RefreshVisibleItems(Player *player) {
     for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
       player->SetVisibleItemSlot(
@@ -3177,6 +3417,41 @@ private:
       _playerStates;
 };
 
+AscensionCollectionModels::Entry const* FindCollectionModel(uint32 creatureId)
+{
+    auto const& models = AscensionCollectionModels::Entries;
+    auto const itr = std::lower_bound(models.begin(), models.end(), creatureId,
+        [](AscensionCollectionModels::Entry const& model, uint32 value)
+        {
+            return model.CreatureId < value;
+        });
+    return itr != models.end() && itr->CreatureId == creatureId ? &*itr : nullptr;
+}
+
+bool SendCollectionCreatureQueryResponse(WorldSession* session, uint32 creatureId)
+{
+    AscensionCollectionModels::Entry const* model = FindCollectionModel(creatureId);
+    if (!session || !model)
+        return false;
+
+    // Normal WotLK creature-query wire layout, mirrored from QueryHandler.
+    // This provides preview metadata only; it does not spawn a creature or
+    // invent combat stats/loot for an Ascension NPC absent from the world DB.
+    WorldPacket response(SMSG_CREATURE_QUERY_RESPONSE, 100);
+    response << creatureId << std::string(model->Name);
+    for (uint8 i = 0; i < 5; ++i)
+        response << uint8(0); // name2/3/4, title, icon
+    response << uint32(0) << uint32(CREATURE_TYPE_CRITTER) << uint32(0);
+    response << uint32(0) << uint32(0) << uint32(0); // rank, kill credits
+    response << model->DisplayId << uint32(0) << uint32(0) << uint32(0);
+    response << float(1.0f) << float(1.0f) << uint8(0);
+    for (uint8 i = 0; i < 6; ++i)
+        response << uint32(0); // quest items
+    response << uint32(0); // movementId
+    session->SendPacket(&response);
+    return true;
+}
+
 class AscensionCompatServerScript : public ServerScript {
 public:
   AscensionCompatServerScript()
@@ -3198,32 +3473,13 @@ public:
         if (sObjectMgr->GetCreatureTemplate(entry))
             return true;
 
-        auto const& models = AscensionCollectionModels::Entries;
-        auto const itr = std::lower_bound(models.begin(), models.end(), entry,
-            [](AscensionCollectionModels::Entry const& model, uint32 value)
-            {
-                return model.CreatureId < value;
-            });
-        if (itr == models.end() || itr->CreatureId != entry)
+        AscensionCollectionModels::Entry const* model = FindCollectionModel(entry);
+        if (!model)
             return true;
 
-        // Normal WotLK creature-query wire layout, mirrored from QueryHandler.
-        // This provides preview metadata only; it does not spawn a creature or
-        // invent combat stats/loot for an Ascension NPC absent from the world DB.
-        WorldPacket response(SMSG_CREATURE_QUERY_RESPONSE, 100);
-        response << entry << std::string(itr->Name);
-        for (uint8 i = 0; i < 5; ++i)
-            response << uint8(0); // name2/3/4, title, icon
-        response << uint32(0) << uint32(CREATURE_TYPE_CRITTER) << uint32(0);
-        response << uint32(0) << uint32(0) << uint32(0); // rank, kill credits
-        response << itr->DisplayId << uint32(0) << uint32(0) << uint32(0);
-        response << float(1.0f) << float(1.0f) << uint8(0);
-        for (uint8 i = 0; i < 6; ++i)
-            response << uint32(0); // quest items
-        response << uint32(0); // movementId
-        session->SendPacket(&response);
+        SendCollectionCreatureQueryResponse(session, entry);
         LOG_DEBUG("module.ascension_compat", "Answered local creature preview query: entry {}, display {}, payload {}",
-            entry, itr->DisplayId, packet.size());
+            entry, model->DisplayId, packet.size());
         return false;
     }
 
@@ -3234,6 +3490,22 @@ public:
       return true;
 
     uint32 opcode = packet.GetOpcode();
+
+    // Ascension character-selection protocol: activate/deactivate and the
+    // account sort order arrive on the character screen (STATUS_AUTHED, no
+    // Player object) and are account-scoped.
+    if (IsAscensionCharacterSelectionOpcode(static_cast<uint16>(opcode)))
+    {
+      if (HandleAscensionCharacterSelectionPacket(session, packet))
+        return false;
+    }
+    else if (opcode == CMSG_CHAR_ENUM)
+    {
+      // The core still answers SMSG_CHAR_ENUM (and records the account's
+      // legit characters); the Ascension list details follow in own packets.
+      SendAscensionCharacterListInfo(session);
+    }
+
     uint32 firstOpcode = ascensionCompatConfig.GetConfigValue<uint32>(
         AscensionCompatConfig::FIRST_EXTENSION_OPCODE);
     uint32 lastOpcode = ascensionCompatConfig.GetConfigValue<uint32>(
@@ -3247,6 +3519,45 @@ public:
     // consuming it during protocol discovery.
     if (opcode == CMSG_ANTICHEAT_ALERT)
       return true;
+
+    if (opcode == CMSG_CREATURE_ASSET_QUERY_MULTIPLE)
+    {
+        constexpr uint32 maxCreatureQueries = 256;
+        if (!session || packet.size() < sizeof(uint32))
+        {
+            LOG_WARN("module.ascension_compat",
+                "Malformed Ascension creature asset query payload={} bytes", packet.size());
+            return false;
+        }
+
+        uint32 const count = packet.read<uint32>(0);
+        if (!count || count > maxCreatureQueries)
+        {
+            LOG_WARN("module.ascension_compat",
+                "Malformed Ascension creature asset query count={} payload={} bytes", count, packet.size());
+            return false;
+        }
+
+        std::size_t const expectedSize = sizeof(uint32) + std::size_t(count) * sizeof(uint32);
+        if (packet.size() != expectedSize)
+        {
+            LOG_WARN("module.ascension_compat",
+                "Malformed Ascension creature asset query count={} payload={} bytes", count, packet.size());
+            return false;
+        }
+
+        uint32 answered = 0;
+        for (uint32 index = 0; index < count; ++index)
+        {
+            uint32 const entry = packet.read<uint32>(sizeof(uint32) + std::size_t(index) * sizeof(uint32));
+            if (SendCollectionCreatureQueryResponse(session, entry))
+                ++answered;
+        }
+
+        LOG_DEBUG("module.ascension_compat",
+            "Answered Ascension creature asset query: requested {}, answered {}", count, answered);
+        return false;
+    }
 
     if (QueueAscensionManastormPacket(session, packet))
       return false;
@@ -3620,6 +3931,7 @@ public:
     if (ascensionCompatConfig.GetConfigValue<bool>(
             AscensionCompatConfig::ENABLED)) {
       AscensionClassService::Instance().OnPlayerLogin(player);
+      RemoveLegacyQuestSpells(player);
       SynchronizeAscensionClassMechanics(player);
       AscensionResourceService::Instance().OnPlayerLogin(player);
       AscensionCollectionService::Instance().OnPlayerLogin(player);
@@ -3725,7 +4037,8 @@ public:
   void OnPlayerUpdate(Player *player, uint32 diff) override {
     if (ascensionCompatConfig.GetConfigValue<bool>(
             AscensionCompatConfig::ENABLED)) {
-      AscensionResourceService::Instance().OnPlayerUpdate(player);
+      AscensionClassService::Instance().UpdateClassTuning(player, diff);
+      AscensionResourceService::Instance().OnPlayerUpdate(player, diff);
       AscensionCollectionService::Instance().OnPlayerUpdate(player, diff);
       EquipNewItems(player);
     }
@@ -3887,7 +4200,7 @@ class AscensionCompatUnitScript : public UnitScript {
 public:
   AscensionCompatUnitScript()
       : UnitScript("AscensionCompatUnitScript", true,
-            {UNITHOOK_ON_DAMAGE, UNITHOOK_ON_BLOCK,
+            {UNITHOOK_ON_BLOCK,
              UNITHOOK_ON_PERIODIC_DAMAGE_RESULT,
              UNITHOOK_ON_AURA_APPLY, UNITHOOK_ON_AURA_REMOVE,
              UNITHOOK_ON_SEND_AURA_UPDATE}) {}
@@ -3898,15 +4211,6 @@ public:
         if (ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED))
             SendAscensionAuraAmounts(target, receiver, application, remove);
     }
-
-  void OnDamage(Unit* /*attacker*/, Unit* victim, uint32& damage) override {
-    if (!ascensionCompatConfig.GetConfigValue<bool>(
-            AscensionCompatConfig::ENABLED) ||
-        !victim || !victim->IsPlayer())
-      return;
-
-    HandleAscensionClassMechanicsDamageTaken(victim->ToPlayer(), damage);
-  }
 
   void OnBlock(Unit *victim, Unit * /*attacker*/) override {
     if (!ascensionCompatConfig.GetConfigValue<bool>(
@@ -4003,6 +4307,36 @@ public:
         {
             ApplyAscensionChangelogSpellChanges(spellInfo);
             ApplyAscensionExperienceContracts(spellInfo);
+            switch (spellInfo->Id)
+            {
+                // Cosmetic visual spells whose legacy aura type was left empty in the client DBC.
+                case 83328: case 83329: case 83330: case 83331: case 83332:
+                case 83334: case 83335: case 83336: case 103921:
+                    if (spellInfo->Effects[EFFECT_0].Effect == SPELL_EFFECT_APPLY_AURA &&
+                        spellInfo->Effects[EFFECT_0].ApplyAuraName == SPELL_AURA_NONE)
+                        spellInfo->Effects[EFFECT_0].ApplyAuraName = SPELL_AURA_DUMMY;
+                    break;
+                // Shadowlands "mawhorsespikes" ground horses imported with a mounted-flight effect that the
+                // other fourteen mounts of the same import block (91611-91614, 91620-91629) do not carry.
+                // The client records leave SPELL_ATTR4_ONLY_FLYING_AREAS clear, so SpellInfo::CheckLocation
+                // never runs the continent gate and AuraEffect::HandleAuraModIncreaseFlightSpeed grants
+                // CAN_FLY anywhere, including Azeroth at level 1 with no riding skill. Drop the flight
+                // effect so these mounts match their ground-only siblings.
+                case 91616: case 91617: case 91618: case 91619:
+                    if (spellInfo->Effects[EFFECT_0].ApplyAuraName == SPELL_AURA_MOUNTED &&
+                        spellInfo->Effects[EFFECT_1].ApplyAuraName == SPELL_AURA_MOD_INCREASE_MOUNTED_SPEED &&
+                        spellInfo->Effects[EFFECT_2].Effect == SPELL_EFFECT_APPLY_AURA &&
+                        spellInfo->Effects[EFFECT_2].ApplyAuraName == SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED &&
+                        !spellInfo->HasAttribute(SPELL_ATTR4_ONLY_FLYING_AREAS))
+                    {
+                        spellInfo->Effects[EFFECT_2].Effect = SPELL_EFFECT_NONE;
+                        spellInfo->Effects[EFFECT_2].ApplyAuraName = SPELL_AURA_NONE;
+                        spellInfo->Effects[EFFECT_2].BasePoints = 0;
+                    }
+                    break;
+                default:
+                    break;
+            }
             ApplyAscensionClassMechanics(spellInfo);
             ApplyAscensionPrimalistEarthshapingContracts(spellInfo);
             ApplyAscensionPrimalistSpiritBeastContract(spellInfo);
@@ -4283,6 +4617,46 @@ public:
     }
 };
 
+class spell_ascension_legacy_quest_reward : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_legacy_quest_reward);
+
+    bool Validate(SpellInfo const* info) override
+    {
+        LegacyQuestReward const* reward = GetLegacyQuestReward(info->Id);
+        if (!reward)
+            return false;
+
+        for (uint8 index = 0; index < MAX_SPELL_EFFECTS; ++index)
+            if (reward->Spells[index] && (info->Effects[index].Effect != SPELL_EFFECT_LEARN_SPELL ||
+                info->Effects[index].TriggerSpell != reward->Spells[index]))
+                return false;
+        return true;
+    }
+
+    bool Load() override
+    {
+        return ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED);
+    }
+
+    void HandleLearn(SpellEffIndex effect)
+    {
+        LegacyQuestReward const* reward = GetLegacyQuestReward(GetSpellInfo()->Id);
+        if (!reward || !reward->Spells[effect])
+            return;
+
+        if (Player* player = GetHitPlayer())
+            if (IsAscensionCustomClass(player))
+                PreventHitDefaultEffect(effect);
+    }
+
+    void Register() override
+    {
+        OnEffectHitTarget += SpellEffectFn(spell_ascension_legacy_quest_reward::HandleLearn,
+            EFFECT_ALL, SPELL_EFFECT_LEARN_SPELL);
+    }
+};
+
 // Ascension mount buttons frequently cast a wrapper, not the riding aura.
 // Resolve only validated catalog wrappers, using the same zone/riding rules
 // as AzerothCore's spell_gen_mount and the matching client spell variants.
@@ -4371,6 +4745,43 @@ class spell_ascension_local_mount : public SpellScript
     }
 };
 
+class npc_ascension_training_book : public CreatureScript
+{
+public:
+    npc_ascension_training_book() : CreatureScript("npc_ascension_training_book") { }
+
+    enum BookGossip : uint32
+    {
+        TextTraining = 900370,
+        ActionRestoreAbilities = GOSSIP_ACTION_INFO_DEF + 1
+    };
+
+    bool OnGossipHello(Player* player, Creature* creature) override
+    {
+        ClearGossipMenuFor(player);
+        if (ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED) &&
+            IsAscensionCustomClass(player))
+            AddGossipItemFor(player, GOSSIP_ICON_TRAINER, "Restore my available class abilities.",
+                GOSSIP_SENDER_MAIN, ActionRestoreAbilities);
+        SendGossipMenuFor(player, TextTraining, creature->GetGUID());
+        return true;
+    }
+
+    bool OnGossipSelect(Player* player, Creature* /*creature*/, uint32 sender, uint32 action) override
+    {
+        ClearGossipMenuFor(player);
+        CloseGossipMenuFor(player);
+        if (sender != GOSSIP_SENDER_MAIN || action != ActionRestoreAbilities ||
+            !ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED) ||
+            !IsAscensionCustomClass(player))
+            return true;
+
+        if (!AscensionClassService::Instance().SynchronizeProgression(player))
+            ChatHandler(player->GetSession()).SendSysMessage("Your available class abilities are already up to date.");
+        return true;
+    }
+};
+
 class spell_ascension_experience_potion : public SpellScript
 {
     PrepareSpellScript(spell_ascension_experience_potion);
@@ -4429,8 +4840,10 @@ bool IsAscensionPrimalistWeaponsEligible(Player const* player, bool allowUnconfi
 }
 
 void AddAscensionCompatScripts() {
+  new npc_ascension_training_book();
   RegisterSpellScript(spell_ascension_experience_potion);
   RegisterSpellScript(spell_ascension_local_mount);
+  RegisterSpellScript(spell_ascension_legacy_quest_reward);
   new AscensionTradesmanScroll();
   new AscensionCompatServerScript();
   new AscensionCompatCommandScript();
