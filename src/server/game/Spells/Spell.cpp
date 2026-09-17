@@ -3669,7 +3669,15 @@ SpellCastResult Spell::prepare(SpellCastTargets const* targets, AuraEffect const
     if ((HasTriggeredCastFlag(TRIGGERED_CAST_DIRECTLY) && (!m_spellInfo->IsChanneled() || !m_spellInfo->GetMaxDuration())) ||
         (m_caster->IsPlayer() && m_caster->getClass() == CLASS_NECROMANCER && m_spellInfo->Id == 500991) ||
         (m_caster->IsPlayer() && m_caster->getClass() == CLASS_STARCALLER && m_spellInfo->Id == 800386))
+    {
+        // SPELL_ATTR4_ALLOW_CAST_WHILE_CASTING adds TRIGGERED_CAST_DIRECTLY to ordinary player
+        // casts, which sends them down this branch and past the global cooldown their own
+        // StartRecoveryTime asks for. Real triggered casts carry TRIGGERED_IGNORE_GCD through
+        // TRIGGERED_FULL_MASK and still skip it. Trigger before cast(), which may finish the spell.
+        if (m_spellInfo->HasAttribute(SPELL_ATTR4_ALLOW_CAST_WHILE_CASTING) && !HasTriggeredCastFlag(TRIGGERED_IGNORE_GCD))
+            TriggerGlobalCooldown();
         cast(true);
+    }
     else
     {
         // stealth must be removed at cast starting (at show channel bar)
@@ -9080,9 +9088,10 @@ void Spell::TriggerGlobalCooldown()
 
     // Only players or controlled units have global cooldown
     if (m_caster->GetCharmInfo())
-        m_caster->GetCharmInfo()->GetGlobalCooldownMgr().AddGlobalCooldown(m_spellInfo, gcd);
+        m_globalCooldownGeneration =
+            m_caster->GetCharmInfo()->GetGlobalCooldownMgr().AddGlobalCooldown(m_spellInfo, gcd);
     else if (m_caster->IsPlayer())
-        m_caster->ToPlayer()->GetGlobalCooldownMgr().AddGlobalCooldown(m_spellInfo, gcd);
+        m_globalCooldownGeneration = m_caster->ToPlayer()->GetGlobalCooldownMgr().AddGlobalCooldown(m_spellInfo, gcd);
 }
 
 void Spell::CancelGlobalCooldown()
@@ -9094,11 +9103,16 @@ void Spell::CancelGlobalCooldown()
     if (m_caster->GetCurrentSpell(CURRENT_GENERIC_SPELL) != this)
         return;
 
+    // Only the cooldown this cast started. A cast-while-casting spell can start a newer one in the same category
+    // while this cast is still in progress, and interrupting this cast must not clear it.
+    if (!m_globalCooldownGeneration)
+        return;
+
     // Only players or controlled units have global cooldown
     if (m_caster->GetCharmInfo())
-        m_caster->GetCharmInfo()->GetGlobalCooldownMgr().CancelGlobalCooldown(m_spellInfo);
+        m_caster->GetCharmInfo()->GetGlobalCooldownMgr().CancelGlobalCooldown(m_spellInfo, m_globalCooldownGeneration);
     else if (m_caster->IsPlayer())
-        m_caster->ToPlayer()->GetGlobalCooldownMgr().CancelGlobalCooldown(m_spellInfo);
+        m_caster->ToPlayer()->GetGlobalCooldownMgr().CancelGlobalCooldown(m_spellInfo, m_globalCooldownGeneration);
 }
 
 void Spell::OnSpellLaunch()

@@ -26,6 +26,7 @@
 #include "SpellMgr.h"
 #include "TransportMgr.h"
 #include "World.h"
+#include <algorithm>
 #include <map>
 
 typedef std::map<uint16, uint32> AreaFlagByAreaID;
@@ -200,6 +201,7 @@ DBCStorage <WorldMapOverlayEntry> sWorldMapOverlayStore(WorldMapOverlayEntryfmt)
 typedef std::list<std::string> StoreProblemList;
 
 uint32 DBCFileCount = 0;
+static std::string sDBCPath;
 
 static bool LoadDBC_assert_print(uint32 fsize, uint32 rsize, std::string const& filename)
 {
@@ -234,6 +236,10 @@ inline void LoadDBC(uint32& availableDbcLocales, StoreProblemList& errors, DBCSt
             if (!storage.LoadStringsFrom(localizedName.c_str()))
                 availableDbcLocales &= ~(1 << i);             // mark as not available for speedup next checks
         }
+
+        if (uint32 invalidStrings = storage.GetInvalidStringCount())
+            LOG_WARN("dbc", "{}: {} strings point outside the string block; loaded as empty.",
+                dbcFilename, invalidStrings);
     }
 
     if (dbTable)
@@ -263,6 +269,7 @@ void LoadDBCStores(std::string const& dataPath)
     uint32 oldMSTime = getMSTime();
 
     std::string dbcPath = dataPath + "dbc/";
+    sDBCPath = dbcPath;
 
     StoreProblemList bad_dbc_files;
     uint32 availableDbcLocales = 0xFFFFFFFF;
@@ -548,6 +555,10 @@ void LoadDBCStores(std::string const& dataPath)
     for (TaxiPathNodeEntry const* entry : sTaxiPathNodeStore)
         sTaxiPathNodesByPath[entry->path][entry->index] = entry;
 
+    // Paths are walked by position; drop unused node numbers (CoA's path 1984 starts at node 1).
+    for (TaxiPathNodeList& nodes : sTaxiPathNodesByPath)
+        nodes.erase(std::remove(nodes.begin(), nodes.end(), nullptr), nodes.end());
+
     // Initialize global taxinodes mask
     // include existed nodes that have at least single not spell base (scripted) path
     {
@@ -649,8 +660,25 @@ void LoadDBCStores(std::string const& dataPath)
         exit(1);
     }
 
+    // Rows only the CoA client set has. World content references them, and the SQL overlays no longer
+    // backfill any, so a stock or partially copied set would silently drop that content.
+    if (!sCurrencyTypesStore.LookupEntry(375250)          ||       // Rune of Ascension
+            !sCreatureDisplayInfoStore.LookupEntry(236827)  ||       // Blood Parasite
+            !sGameObjectDisplayInfoStore.LookupEntry(87226) ||       // Worldforged pickup
+            !sItemLimitCategoryStore.LookupEntry(2414)      ||
+            !sMapStore.LookupEntry(3690)                    )        // Brawler's Guild
+    {
+        LOG_ERROR("dbc", "DataDir does not hold the CoA client DBC set. Install it with apps/coa-dbc/client_dbc.py.");
+        exit(1);
+    }
+
     LOG_INFO("server.loading", ">> Initialized {} Data Stores in {} ms", DBCFileCount, GetMSTimeDiffToNow(oldMSTime));
     LOG_INFO("server.loading", " ");
+}
+
+std::string GetClientDBCPath(std::string_view fileName)
+{
+    return sDBCPath + std::string(fileName);
 }
 
 SimpleFactionsList const* GetFactionTeamList(uint32 faction)
