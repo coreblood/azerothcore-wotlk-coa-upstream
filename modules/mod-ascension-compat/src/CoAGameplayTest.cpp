@@ -4,6 +4,7 @@
  */
 
 #include "AccountMgr.h"
+#include "AscensionWisdomball.h"
 #include "AsyncCallbackProcessor.h"
 #include "CharacterCache.h"
 #include "Chat.h"
@@ -93,6 +94,7 @@ struct Actor
     std::map<std::string, uint32> whoClasses;
     uint32 whoResponses = 0;
     uint32 lootReceived = 0;
+    uint32 lastQuestWindow = 0; // the last quest window this session sent, by opcode
     std::unique_ptr<WorldSession> session;
     ObjectGuid guid;
     ActorStage stage = ActorStage::Account;
@@ -262,6 +264,13 @@ private:
                 SEC_PLAYER, EXPANSION_WRATH_OF_THE_LICH_KING, 0, LOCALE_enUS, 0, false, false, 0);
             actor.session->SetSocketlessPacketObserver([&actor](WorldPacket const& packet)
             {
+                // Which window a click is answered with is the part the client would draw, and
+                // the part a click that answers with the wrong one leaves looping. Record it.
+                if (packet.GetOpcode() == SMSG_QUESTGIVER_OFFER_REWARD ||
+                    packet.GetOpcode() == SMSG_QUESTGIVER_REQUEST_ITEMS ||
+                    packet.GetOpcode() == SMSG_QUESTGIVER_QUEST_DETAILS)
+                    actor.lastQuestWindow = packet.GetOpcode();
+
                 if (packet.GetOpcode() != SMSG_WHO)
                     return;
                 WorldPacket response(packet);
@@ -399,6 +408,36 @@ private:
         return creature;
     }
 
+    // The creature of that entry this player owns and has out. A summoned companion is not a
+    // scenario fixture, so quest steps address it by entry instead of by actor name.
+    Creature* GetOwnedCreature(Player* player, uint32 entry)
+    {
+        std::list<Creature*> creatures;
+        player->GetCreatureListWithEntryInGrid(creatures, entry, 100.0f);
+        for (Creature* creature : creatures)
+            if (creature->IsAlive() && creature->GetOwnerGUID() == player->GetGUID()
+                && player->InSamePhase(creature))
+                return creature;
+
+        return nullptr;
+    }
+
+    /// The summoned giver a quest step is aimed at: the player's own first, then any summon of
+    /// that entry standing within reach - a ball another player put out serves whoever is at it.
+    Creature* GetGiver(Player* player, uint32 entry)
+    {
+        if (Creature* owned = GetOwnedCreature(player, entry))
+            return owned;
+
+        std::list<Creature*> creatures;
+        player->GetCreatureListWithEntryInGrid(creatures, entry, 30.0f);
+        for (Creature* creature : creatures)
+            if (creature->IsAlive() && player->InSamePhase(creature))
+                return creature;
+
+        return nullptr;
+    }
+
     void CreateTargets()
     {
         if (auto creatures = _scenario.get_child_optional("creatures"))
@@ -457,10 +496,48 @@ private:
             return unit->IsNonMeleeSpellCast(false);
         if (metric == "level")
             return unit->GetLevel();
+        if (metric == "stat")
+        {
+            uint32 stat = step.get<uint32>("stat");
+            Require(stat < MAX_STATS, "Invalid stat index");
+            return unit->GetStat(Stats(stat));
+        }
+        if (metric == "attack_power" || metric == "ranged_attack_power")
+            return unit->GetTotalAttackPowerValue(metric == "attack_power" ? BASE_ATTACK : RANGED_ATTACK);
+        if (metric == "armor")
+            return unit->GetArmor();
+        if (metric == "resistance")
+        {
+            uint32 school = step.get<uint32>("school");
+            Require(school > SPELL_SCHOOL_NORMAL && school < MAX_SPELL_SCHOOL, "Invalid resistance school");
+            return unit->GetResistance(SpellSchools(school));
+        }
+        if (metric == "attack_time_ms")
+        {
+            uint32 hand = step.get<uint32>("hand", BASE_ATTACK);
+            Require(hand < MAX_ATTACK, "Invalid attack hand");
+            // The update field holds the hasted swing time; GetAttackTime divides haste back out.
+            return unit->GetFloatValue(static_cast<uint16>(UNIT_FIELD_BASEATTACKTIME) + hand);
+        }
+        if (metric == "run_speed_rate")
+            return unit->GetSpeedRate(MOVE_RUN);
+        if (metric == "spell_damage_taken" || metric == "melee_damage_taken")
+        {
+            // Any unit can be the victim; `target` is the attacker. A melee `spell` selects a weapon strike.
+            Unit* attacker = GetUnit(step.get<std::string>("target"));
+            SpellInfo const* info = spell ? sSpellMgr->GetSpellInfo(spell) : nullptr;
+            Require(!spell || info != nullptr, "Unknown spell for incoming damage calculation");
+            if (metric == "melee_damage_taken")
+                return unit->MeleeDamageBonusTaken(attacker, 1000, BASE_ATTACK, info,
+                    info ? info->GetSchoolMask() : SPELL_SCHOOL_MASK_NORMAL);
+            Require(info != nullptr, "Incoming spell damage needs a spell");
+            return unit->SpellDamageBonusTaken(attacker, info, 1000, SPELL_DIRECT_DAMAGE);
+        }
         if (metric.rfind("aura", 0) == 0)
         {
             Require(metric == "aura" || metric == "aura_stacks" || metric == "aura_charges"
-                || metric == "aura_duration_ms" || metric == "aura_amount" || metric == "aura_positive",
+                || metric == "aura_duration_ms" || metric == "aura_amount" || metric == "aura_positive"
+                || metric == "aura_amplitude_ms" || metric == "aura_crit_chance" || metric == "aura_script_value",
                 "Unknown aura metric");
             Require(sSpellMgr->GetSpellInfo(spell) != nullptr, "Unknown aura spell");
             ObjectGuid caster;
@@ -482,12 +559,15 @@ private:
                 return aura->GetCharges();
             if (metric == "aura_duration_ms")
                 return aura->GetDuration();
-            if (metric == "aura_amount")
-            {
-                uint32 effect = step.get<uint32>("effect", 0);
-                Require(effect < MAX_SPELL_EFFECTS && aura->GetEffect(effect), "Aura effect does not exist");
-                return aura->GetEffect(effect)->GetAmount();
-            }
+            if (metric == "aura_script_value")
+                return double(aura->GetScriptValue(step.get<uint32>("key")));
+            uint32 effect = step.get<uint32>("effect", 0);
+            Require(effect < MAX_SPELL_EFFECTS && aura->GetEffect(effect), "Aura effect does not exist");
+            if (metric == "aura_amplitude_ms")
+                return aura->GetEffect(effect)->GetAmplitude();
+            if (metric == "aura_crit_chance")
+                return aura->GetEffect(effect)->GetCritChance();
+            return aura->GetEffect(effect)->GetAmount();
         }
         Player* player = unit->ToPlayer();
         Require(player != nullptr, "Metric requires a player: " + metric);
@@ -532,16 +612,96 @@ private:
         if (metric == "cast_speed_multiplier")
             return player->GetFloatValue(UNIT_MOD_CAST_SPEED);
         if (metric == "spell_crit_chance")
-            return player->GetFloatValue(PLAYER_SPELL_CRIT_PERCENTAGE1 + SPELL_SCHOOL_SHADOW);
-        if (metric == "spell_damage_taken" || metric == "melee_damage_taken")
         {
+            uint32 school = step.get<uint32>("school", SPELL_SCHOOL_SHADOW);
+            Require(school < MAX_SPELL_SCHOOL, "Invalid spell school");
+            return player->GetFloatValue(PLAYER_SPELL_CRIT_PERCENTAGE1 + school);
+        }
+        if (metric == "melee_crit_chance")
+            return player->GetFloatValue(PLAYER_CRIT_PERCENTAGE);
+        if (metric == "dodge_chance")
+            return player->GetFloatValue(PLAYER_DODGE_PERCENTAGE);
+        if (metric == "parry_chance")
+            return player->GetFloatValue(PLAYER_PARRY_PERCENTAGE);
+        if (metric == "expertise")
+            return player->GetUInt32Value(PLAYER_EXPERTISE);
+        if (metric == "melee_hit_chance")
+            return player->m_modMeleeHitChance;
+        if (metric == "spell_hit_chance")
+            return player->m_modSpellHitChance;
+        if (metric == "spell_power")
+        {
+            uint32 school = step.get<uint32>("school");
+            Require(school > SPELL_SCHOOL_NORMAL && school < MAX_SPELL_SCHOOL, "Invalid spell power school");
+            return player->SpellBaseDamageBonusDone(SpellSchoolMask(1 << school));
+        }
+        if (metric == "combat_rating")
+        {
+            uint32 rating = step.get<uint32>("rating");
+            Require(rating < MAX_COMBAT_RATING, "Invalid combat rating");
+            return player->GetUInt32Value(static_cast<uint16>(PLAYER_FIELD_COMBAT_RATING_1) + rating);
+        }
+        if (metric.rfind("script_", 0) == 0)
+        {
+            // Module damage-taken hooks with a fixed base of 1000 and `target` as the attacker.
             Unit* attacker = GetUnit(step.get<std::string>("target"));
-            if (metric == "melee_damage_taken")
-                return player->MeleeDamageBonusTaken(attacker, 1000, BASE_ATTACK);
-
             SpellInfo const* info = sSpellMgr->GetSpellInfo(spell);
-            Require(info != nullptr, "Unknown spell for incoming damage calculation");
-            return player->SpellDamageBonusTaken(attacker, info, 1000, SPELL_DIRECT_DAMAGE);
+            if (metric == "script_melee_damage_taken")
+            {
+                uint32 damage = 1000;
+                sScriptMgr->ModifyMeleeDamage(player, attacker, damage);
+                return damage;
+            }
+            Require(info != nullptr, "Unknown spell for scripted damage taken");
+            if (metric == "script_spell_damage_taken")
+            {
+                int32 damage = 1000;
+                sScriptMgr->ModifySpellDamageTaken(player, attacker, damage, info);
+                return damage;
+            }
+            Require(metric == "script_periodic_damage_taken", "Unknown scripted damage metric");
+            uint32 damage = 1000;
+            sScriptMgr->ModifyPeriodicDamageAurasTick(player, attacker, damage, info);
+            return damage;
+        }
+        if (metric == "spell_done_crit_chance" || metric == "melee_spell_damage_done")
+        {
+            Unit* target = GetUnit(step.get<std::string>("target"));
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(spell);
+            Require(info != nullptr, "Unknown spell in metric");
+            if (metric == "spell_done_crit_chance")
+                return player->SpellDoneCritChance(target, info, info->GetSchoolMask(), BASE_ATTACK, false);
+            return player->MeleeDamageBonusDone(target, 1000, BASE_ATTACK, info, info->GetSchoolMask());
+        }
+        if (metric == "spell_modifier" || metric == "spell_cast_time_ms" || metric == "spell_max_range"
+            || metric == "spell_max_stacks" || metric == "spell_healing_done" || metric == "spell_effect_value")
+        {
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(spell);
+            Require(info != nullptr, "Unknown spell in metric");
+            // Native modifier consumers without submitting a cast; the probe applies no charges.
+            if (metric == "spell_modifier")
+            {
+                uint32 op = step.get<uint32>("op");
+                Require(op < MAX_SPELLMOD, "Invalid spell modifier operation");
+                float value = step.get<float>("base");
+                player->ApplySpellMod(spell, SpellModOp(op), value);
+                return value;
+            }
+            if (metric == "spell_effect_value")
+            {
+                uint32 effect = step.get<uint32>("effect", EFFECT_0);
+                Require(effect < MAX_SPELL_EFFECTS && info->Effects[effect].IsEffect(), "Spell effect does not exist");
+                return info->Effects[effect].CalcValue(player);
+            }
+            if (metric == "spell_cast_time_ms")
+                return info->CalcCastTime(player);
+            if (metric == "spell_max_range")
+                return info->GetMaxRange(info->IsPositive(), player);
+            if (metric == "spell_max_stacks")
+                return info->CalcMaxAuraStacks(player);
+            if (metric == "spell_healing_done")
+                return player->SpellHealingBonusDone(GetUnit(step.get<std::string>("target")), info, 1000, HEAL,
+                    uint8(step.get<uint32>("effect", EFFECT_0)));
         }
         if (metric == "spell_damage_done" || metric == "melee_damage_done")
         {
@@ -628,6 +788,56 @@ private:
             uint32 item = step.get<uint32>("item");
             Require(sObjectMgr->GetItemTemplate(item) != nullptr, "Unknown item in metric");
             return player->GetItemCount(item);
+        }
+        if (metric == "quest_status" || metric == "quest_takeable")
+        {
+            uint32 quest = step.get<uint32>("quest");
+            Quest const* questTemplate = sObjectMgr->GetQuestTemplate(quest);
+            Require(questTemplate != nullptr, "Unknown quest in metric");
+            // Takeable is the game's own answer, prerequisites and all; status is what the log holds.
+            return metric == "quest_status" ? double(player->GetQuestStatus(quest))
+                : double(player->CanTakeQuest(questTemplate, false));
+        }
+        if (metric == "dialog_status")
+        {
+            // The mark the client draws over a quest giver, as the server would send it.
+            uint32 entry = step.get<uint32>("entry");
+            Require(sObjectMgr->GetCreatureTemplate(entry) != nullptr, "Unknown creature entry in metric");
+            Creature* giver = GetGiver(player, entry);
+            return giver ? double(player->GetQuestDialogStatus(giver)) : 0.0;
+        }
+        if (metric == "ball_offer_count" || metric == "ball_offers_quest")
+        {
+            // The list the wisdomball's gossip is drawn from, for the map the player stands in.
+            Require(AscensionWisdomball::UsableBall(player) != nullptr, "No wisdomball is within reach of the player");
+            std::vector<uint32> const offered = AscensionWisdomball::OfferedQuests(player);
+            if (metric == "ball_offer_count")
+                return double(offered.size());
+            uint32 quest = step.get<uint32>("quest");
+            Require(sObjectMgr->GetQuestTemplate(quest) != nullptr, "Unknown quest in metric");
+            return std::count(offered.begin(), offered.end(), quest) ? 1.0 : 0.0;
+        }
+        if (metric == "ball_carried_count" || metric == "ball_carried_quest"
+            || metric == "ball_turn_in_count" || metric == "ball_turn_in_quest")
+        {
+            // The other half of that list: the dungeon quests the character is carrying, which
+            // the frame shows with the "?" wherever the ball is, and the ones ready to hand in.
+            Require(AscensionWisdomball::UsableBall(player) != nullptr, "No wisdomball is within reach of the player");
+            bool const handIn = metric.rfind("ball_turn_in", 0) == 0;
+            std::vector<uint32> const listed = handIn ? AscensionWisdomball::TurnInQuests(player)
+                : AscensionWisdomball::CarriedQuests(player);
+            if (metric == "ball_carried_count" || metric == "ball_turn_in_count")
+                return double(listed.size());
+            uint32 quest = step.get<uint32>("quest");
+            Require(sObjectMgr->GetQuestTemplate(quest) != nullptr, "Unknown quest in metric");
+            return std::count(listed.begin(), listed.end(), quest) ? 1.0 : 0.0;
+        }
+        if (metric == "gossip_text")
+        {
+            // The frame's greeting is an npc_text row the server has to be able to send, so a
+            // module's own greeting is asserted here rather than only eyeballed in game.
+            uint32 id = step.get<uint32>("id");
+            return sObjectMgr->GetGossipText(id) != nullptr ? 1.0 : 0.0;
         }
         throw std::runtime_error("Unknown metric: " + metric);
     }
@@ -716,6 +926,14 @@ private:
             return;
         }
         std::string id = step.get<std::string>("actor");
+        if (action == "set_health" && !_actors.count(id))
+        {
+            Unit* creature = GetUnit(id);
+            uint32 health = step.get<uint32>("value");
+            Require(health > 0 && health <= creature->GetMaxHealth(), "Health fixture outside valid range");
+            creature->SetHealth(health);
+            return;
+        }
         Player* player = GetPlayer(id);
         uint32 spell = step.get<uint32>("spell", 0);
         if (action == "learn" || action == "unlearn" || action == "cast" || action == "cast_charm")
@@ -953,6 +1171,120 @@ private:
             uint32 value = step.get<uint32>("value");
             Require(value <= player->GetMaxPower(Powers(power)), "Power fixture exceeds maximum");
             player->SetPower(Powers(power), value);
+        }
+        else if (action == "teleport")
+        {
+            uint32 map = step.get<uint32>("map");
+            float x = step.get<float>("x");
+            float y = step.get<float>("y");
+            float z = step.get<float>("z");
+            float o = step.get<float>("o", 0.0f);
+            Require(sMapStore.LookupEntry(map) != nullptr, "Unknown map to teleport to");
+            player->TeleportTo(map, x, y, z, o);
+            record.put("result", "teleport sent");
+        }
+        else if (action == "quest_accept" || action == "quest_turn_in")
+        {
+            uint32 quest = step.get<uint32>("quest");
+            Require(sObjectMgr->GetQuestTemplate(quest) != nullptr, "Unknown quest");
+
+            Creature* giver = GetGiver(player, step.get<uint32>("entry"));
+            Require(giver != nullptr, "No giver of that entry is within reach of the player");
+
+            // The server's packet loop asks the receive hook first and only reaches the opcode
+            // handler when nothing consumed the packet. Dispatching the same way, with the same
+            // hook, is what makes these steps exercise the giver's own answer.
+            if (action == "quest_turn_in")
+            {
+                WorldPacket request(CMSG_QUESTGIVER_REQUEST_REWARD, 16);
+                request << giver->GetGUID() << quest;
+                _actors.at(id).lastQuestWindow = 0;
+                bool const openToCore = sScriptMgr->CanPacketReceive(player->GetSession(), request);
+                record.put("request_handled_by_script", !openToCore);
+                if (openToCore)
+                    player->GetSession()->HandleQuestgiverRequestRewardOpcode(request);
+
+                // Claiming the reward has to open the reward window. Answering it with the
+                // progress page instead is a loop: that page's button sends this same opcode, so
+                // the player can never hand the quest in.
+                if (!openToCore)
+                {
+                    uint32 const window = _actors.at(id).lastQuestWindow;
+                    record.put("window_after_claim", window == SMSG_QUESTGIVER_OFFER_REWARD
+                        ? "SMSG_QUESTGIVER_OFFER_REWARD" : "not the reward window");
+                    Require(window == SMSG_QUESTGIVER_OFFER_REWARD,
+                        "Claiming the reward did not open the reward window");
+                }
+
+                WorldPacket choose(CMSG_QUESTGIVER_CHOOSE_REWARD, 16);
+                choose << giver->GetGUID() << quest << step.get<uint32>("reward", 0);
+                bool const chooseToCore = sScriptMgr->CanPacketReceive(player->GetSession(), choose);
+                record.put("reward_handled_by_script", !chooseToCore);
+                if (chooseToCore)
+                    player->GetSession()->HandleQuestgiverChooseRewardOpcode(choose);
+            }
+            else
+            {
+                WorldPacket packet(CMSG_QUESTGIVER_ACCEPT_QUEST, 16);
+                packet << giver->GetGUID() << quest << uint8(0);
+                bool const openToCore = sScriptMgr->CanPacketReceive(player->GetSession(), packet);
+                record.put("accept_handled_by_script", !openToCore);
+                if (openToCore)
+                    player->GetSession()->HandleQuestgiverAcceptQuestOpcode(packet);
+            }
+
+            record.put("result", "dispatched as the server's packet loop does");
+        }
+        else if (action == "quest_open")
+        {
+            uint32 quest = step.get<uint32>("quest");
+            Require(sObjectMgr->GetQuestTemplate(quest) != nullptr, "Unknown quest");
+
+            Creature* giver = GetGiver(player, step.get<uint32>("entry"));
+            Require(giver != nullptr, "No giver of that entry is within reach of the player");
+
+            // A click on a name the ball only offers arrives as this packet. The window it
+            // answers with is the client's to draw, so what is asserted here is that the ball's
+            // own script answered it: the core would refuse it, the ball owns no quest relations.
+            WorldPacket packet(CMSG_QUESTGIVER_QUERY_QUEST, 16);
+            packet << giver->GetGUID() << quest << uint8(0);
+            bool const openToCore = sScriptMgr->CanPacketReceive(player->GetSession(), packet);
+            record.put("query_handled_by_script", !openToCore);
+            Require(!openToCore, "A click on a listed name reached the core instead of the giver's script");
+        }
+        else if (action == "quest_click")
+        {
+            // The opcode the client really sends when a name in the frame's active half - a quest
+            // the character already carries - is clicked. It is not the query above, and the core
+            // drops it for the ball, so this is the path an in-game click on such a name takes.
+            uint32 quest = step.get<uint32>("quest");
+            Require(sObjectMgr->GetQuestTemplate(quest) != nullptr, "Unknown quest");
+
+            Creature* giver = GetGiver(player, step.get<uint32>("entry"));
+            Require(giver != nullptr, "No giver of that entry is within reach of the player");
+
+            WorldPacket packet(CMSG_QUESTGIVER_COMPLETE_QUEST, 16);
+            packet << giver->GetGUID() << quest;
+            _actors.at(id).lastQuestWindow = 0;
+            bool const clickToCore = sScriptMgr->CanPacketReceive(player->GetSession(), packet);
+            record.put("click_handled_by_script", !clickToCore);
+            Require(!clickToCore, "A click on a carried name reached the core instead of the giver's script");
+
+            // A carried name answers with one of the two carried windows - the progress page while
+            // it is unfinished or short of items, the reward window once it can be paid out -
+            // never with nothing at all, which is what a click that reaches the core does.
+            uint32 const window = _actors.at(id).lastQuestWindow;
+            record.put("window_after_click", window == SMSG_QUESTGIVER_OFFER_REWARD ? "SMSG_QUESTGIVER_OFFER_REWARD"
+                : window == SMSG_QUESTGIVER_REQUEST_ITEMS ? "SMSG_QUESTGIVER_REQUEST_ITEMS" : "no window");
+            Require(window == SMSG_QUESTGIVER_OFFER_REWARD || window == SMSG_QUESTGIVER_REQUEST_ITEMS,
+                "A click on a carried name was answered with no quest window");
+        }
+        else if (action == "quest_complete")
+        {
+            uint32 quest = step.get<uint32>("quest");
+            Require(sObjectMgr->GetQuestTemplate(quest) != nullptr, "Unknown quest");
+            player->CompleteQuest(quest); // fixture: finish the objectives so a hand-in can be tested
+            record.put("result", "quest marked complete as a fixture");
         }
         else
             throw std::runtime_error("Unknown action: " + action);

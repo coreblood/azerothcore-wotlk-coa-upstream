@@ -5157,6 +5157,15 @@ void Player::CleanupChannels()
     }
 }
 
+// Playerbot helper if bot talks in a different locale
+bool Player::IsInChannel(Channel const* c)
+{
+    return std::any_of(m_channels.begin(), m_channels.end(), [c](Channel const* chan)
+    {
+        return c->GetChannelId() == chan->GetChannelId();
+    });
+}
+
 void Player::ClearChannelWatch()
 {
     for (JoinedChannelsList::iterator itr = m_channels.begin(); itr != m_channels.end(); ++itr)
@@ -7757,8 +7766,19 @@ void Player::CastItemUseSpell(Item* item, SpellCastTargets const& targets, uint8
     }
 
     // xinef: send all spells in one go, prevents crash because container is not set
+    ObjectGuid const itemGuid = item->GetGUID();
     for (std::list<Spell*>::const_iterator itr = pushSpells.begin(); itr != pushSpells.end(); ++itr)
+    {
+        // An earlier spell can use the item's last charge and destroy it; an item that was never saved is
+        // deleted at once, so the remaining spells must not be prepared with it.
+        if (!GetItemByGuid(itemGuid))
+        {
+            delete *itr;
+            continue;
+        }
+
         (*itr)->prepare(&targets);
+    }
 }
 
 void Player::_RemoveAllItemMods()
@@ -9687,7 +9707,15 @@ void Player::StopCastingCharm(Aura* except /*= nullptr*/)
         if (charm->GetCharmerGUID())
         {
             LOG_FATAL("entities.player", "Charmed unit has charmer {}", charm->GetCharmerGUID().ToString());
-            ABORT();
+            // Conquest of Azeroth: a Tinker killed while controlling its Destructo-Bot (50300)
+            // reaches this point with the charm half released. Stopping the whole server for
+            // one creature is worse than forcing the release.
+            LOG_ERROR("entities.player", "Player::StopCastingCharm - forcing the release of {} by {}",
+                      charm->GetGUID().ToString(), GetGUID().ToString());
+            if (charm->GetCharmerGUID() == GetGUID())
+                charm->RemoveCharmedBy(this);
+            if (GetCharmGUID())
+                SetGuidValue(UNIT_FIELD_CHARM, ObjectGuid::Empty);
         }
         else
         {
@@ -10151,9 +10179,11 @@ void Player::ApplySpellMod(uint32 spellId, SpellModOp op, T& basevalue, Spell* s
         if (temporaryPet && mod->ownerAura && mod->ownerAura->IsUsingCharges())
             return;
 
-        // skip if already instant or cost is free
+        // skip if already instant or cost is free; a flat cast time increase can still give an instant spell a cast
+        // time (Templar Holy Light makes the instant Benediction a 1.5 sec cast)
         if (mod->op == SPELLMOD_CASTING_TIME || mod->op == SPELLMOD_COST)
-            if (((float)basevalue + (float)basevalue * (totalmul - 1.0f) + (float)totalflat) <= 0)
+            if (((float)basevalue + (float)basevalue * (totalmul - 1.0f) + (float)totalflat) <= 0 &&
+                !(mod->op == SPELLMOD_CASTING_TIME && mod->type == SPELLMOD_FLAT && mod->value > 0))
                 return;
 
         if (mod->type == SPELLMOD_FLAT)
