@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionPooledVitality.h"
 #include "DBCStores.h"
 #include "Player.h"
 #include "ScriptMgr.h"
@@ -6,6 +7,7 @@
 #include "SpellScript.h"
 #include "SpellInfo.h"
 #include <algorithm>
+#include <vector>
 
 namespace
 {
@@ -20,7 +22,8 @@ enum BloodmageTalentSpells : uint32
     SPELL_SANGUINE_SCRIPTURE = 804851,
     SPELL_SANGUINE_SCRIPTURE_BUFF = 504264,
     SPELL_CURSED_FORM_REQUIREMENT = 525031,
-    SPELL_CURSED_FORM_REQUIREMENT_2 = 524861
+    SPELL_CURSED_FORM_REQUIREMENT_2 = 524861,
+    SPELL_BLOODMOON_POWER = 801961
 };
 
 // Every creature Animated Blood can leave behind: worms, parasites and the rank 3 amalgam.
@@ -39,7 +42,9 @@ bool IsCursedForm(uint32 id)
 // Spell.dbc and are split across the kit's abilities (e.g. Ravenous Strike/Lunge/Claw Sweep/Bloodfang
 // Bite use 525031, while Rotclaw/Ironhide/Reave/Bloodsurge/Apotheosis and others use 524861), so both
 // need to be mirrored onto the real form state, the same way Palm Sigil's marker follows
-// Runeshroud/Waveforged.
+// Runeshroud/Waveforged. AscensionBloodmage::CursedForm (802877) is a third, separate marker: it is
+// the ExcludeCasterAuraSpell Sanguine Mend and the pooled-vitality empowerment check both rely on to
+// block casting while shapeshifted, but nothing else ever grants it either, so it needs the same sync.
 void SyncCursedFormRequirement(Player* player)
 {
     bool active = false;
@@ -50,7 +55,8 @@ void SyncCursedFormRequirement(Player* player)
             break;
         }
 
-    for (uint32 marker : {uint32(SPELL_CURSED_FORM_REQUIREMENT), uint32(SPELL_CURSED_FORM_REQUIREMENT_2)})
+    for (uint32 marker : {uint32(SPELL_CURSED_FORM_REQUIREMENT), uint32(SPELL_CURSED_FORM_REQUIREMENT_2),
+        uint32(AscensionBloodmage::CursedForm)})
     {
         if (!active)
             player->RemoveAurasDueToSpell(marker, player->GetGUID());
@@ -130,6 +136,17 @@ public:
         if (aura->GetId() == SPELL_LIQUIFY && aura->GetCasterGUID() == player->GetGUID() &&
             player->HasAura(SPELL_VAMPIRIC_POOLS))
             player->CastSpell(player, SPELL_VAMPIRIC_POOLS_LEECH, true);
+        if (aura->GetId() == SPELL_LIQUIFY && aura->GetCasterGUID() == player->GetGUID() &&
+            player->HasAura(SPELL_BLOODMOON_POWER))
+        {
+            // Bloodmoon Power: Liquify cleanses all negative dispellable effects when it ends.
+            std::vector<uint32> remove;
+            for (auto const& pair : player->GetAppliedAuras())
+                if (!pair.second->IsPositive() && pair.second->GetBase()->GetSpellInfo()->Dispel != DISPEL_NONE)
+                    remove.push_back(pair.second->GetBase()->GetId());
+            for (uint32 id : remove)
+                player->RemoveAurasDueToSpell(id);
+        }
         if (aura->GetId() == SPELL_ACCURSED_FORM && aura->GetCasterGUID() == player->GetGUID() &&
             player->HasAura(SPELL_SANGUINE_SCRIPTURE))
             player->CastSpell(player, SPELL_SANGUINE_SCRIPTURE_BUFF, true);
