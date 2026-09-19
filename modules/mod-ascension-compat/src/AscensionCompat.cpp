@@ -19,6 +19,7 @@
 #include "AscensionClassMechanics19To25.h"
 #include "AscensionClassMechanics26To32.h"
 #include "AscensionCoATalentData.h"
+#include "AscensionCoATalentState.h"
 #include "AscensionRunemasterEchoes.h"
 #include "AscensionCollectionModelData.h"
 #include "AscensionAmmunitionData.h"
@@ -33,6 +34,7 @@
 #include "AscensionFreshCharacterCheck.h"
 #include "AscensionLiveBaselineData.h"
 #include "AscensionRacialAbilities.h"
+#include "AscensionPrimalistEarthquake.h"
 #include "AscensionPrimalistEarthshaping.h"
 #include "AscensionPrimalistSpiritBeast.h"
 #include "AscensionPrimalistWeapons.h"
@@ -54,6 +56,7 @@
 #include "Battlefield.h"
 #include "BattlefieldMgr.h"
 #include "Chat.h"
+#include "StringFormat.h"
 #include "ClientDBC.h"
 #include "CommandScript.h"
 #include "ConfigValueCache.h"
@@ -103,8 +106,12 @@ using namespace Acore::ChatCommands;
 
 namespace {
 constexpr uint16 CMSG_ANTICHEAT_ALERT = 0x051F;
-constexpr uint16 CMSG_VANITY_DELIVERY = 0x0523;
-constexpr uint16 CMSG_CREATURE_ASSET_QUERY_MULTIPLE = 0x061A;
+// The Character Advancement point purchase. Never observed on this realm: the patch-B
+// Lua shim overrides AddByEntryID/ApplyPendingBuild and sends ".localtalent" instead,
+// so the client never reaches the native send. Answering this opcode is what retires
+// that shim; until then it is listed only so the packet log names it correctly.
+constexpr uint16 CMSG_CUSTOM_ASCENSION_POINT_SPEND_REQUEST = 0x0523;
+constexpr uint16 CMSG_CREATURE_QUERY_BULK = 0x061A;
 constexpr uint16 CMSG_APPLY_APPEARANCES = 0x0697;
 constexpr uint16 SMSG_APPLY_APPEARANCES_RESULT = 0x0698;
 constexpr uint16 SMSG_APPEARANCE_COLLECTION_INFO = 0x0699;
@@ -122,7 +129,13 @@ constexpr uint16 SMSG_VANITY_COLLECTION_ADDED = 0x06F8;
 // what comes back.
 constexpr uint16 SMSG_QUERY_CUSTOM_STORE_RESULT = 0x06BA;
 constexpr std::size_t VANITY_STORE_RECORD_DWORDS = 16;
-constexpr uint16 SMSG_CHARACTER_ADVANCEMENT_AUTHENTICATION = 0x0725;
+// The client's character-advancement service (Extensions.dll). The active-specialization packet also
+// bootstraps the per-character state on its first arrival, so it always goes out before the known-entries
+// packet, whose handler otherwise stores nothing. The client answers a native learn or unlearn with the
+// upload of its complete known set.
+constexpr uint16 SMSG_CHARACTER_ADVANCEMENT_ACTIVE_SPEC = 0x0725;
+constexpr uint16 SMSG_CHARACTER_ADVANCEMENT_KNOWN_ENTRIES = 0x0726;
+constexpr uint16 CMSG_CHARACTER_ADVANCEMENT_KNOWN_ENTRIES = 0x0727;
 constexpr uint16 CMSG_MISSILE_FIRE_POSITION = 0x09C7;
 
 // The client carries a personal-bank mode on top of the guild vault window. It is
@@ -130,10 +143,11 @@ constexpr uint16 CMSG_MISSILE_FIRE_POSITION = 0x09C7;
 // guild-vault object sends the ordinary CMSG_GUILD_BANKER_ACTIVATE, and the
 // server answers with SMSG_BANK_PERMISSIONS so the frame presents itself as the
 // character's own bank (purchasable tabs, depositable soulbound items) instead of
-// a guild's. The id comes from the client's own opcode table in Extensions.dll:
-// it is a contiguous array of name stubs indexed by id - 1, so
-// `id = index + 1`, which resolves every opcode seen in this realm's packet log
-// (0x0741 = CMSG_GOSSIP_CLOSE, 0x061B = CMSG_ITEM_QUERY_BULK, and the ids below).
+// a guild's. The id comes from the client's own opcode table in Extensions.dll: an
+// array of `mov eax, <name>; ret` stubs at file 0x2c3ea6, indexed by the pointer
+// array at file 0x2c6ef0, where the opcode id is the 0-based index into that array.
+// Decoded in .agents/plans/coa-cad-protocol/; it reproduces every opcode seen in this
+// realm's packet log exactly (0x0741 = CMSG_GOSSIP_CLOSE, 0x061B = CMSG_ITEM_QUERY_BULK).
 constexpr uint16 SMSG_BANK_PERMISSIONS = 0x0769;
 
 struct ExtensionOpcodeIdentity {
@@ -143,7 +157,7 @@ struct ExtensionOpcodeIdentity {
 
 constexpr ExtensionOpcodeIdentity EXTENSION_OPCODES[] = {
     {CMSG_ANTICHEAT_ALERT, "CMSG_ANTICHEAT_ALERT"},
-    {CMSG_VANITY_DELIVERY, "CMSG_VANITY_DELIVERY"},
+    {CMSG_CUSTOM_ASCENSION_POINT_SPEND_REQUEST, "CMSG_CUSTOM_ASCENSION_POINT_SPEND_REQUEST"},
     {0x053B, "CMSG_ASCENSIONGM_TICKET_LIST_REQUEST"},
     {0x0561, "CMSG_EXTENSION_INITIALIZED"},
     {0x05A1, "CMSG_CHALLENGE_QUERY_FAILURE"},
@@ -162,7 +176,9 @@ constexpr ExtensionOpcodeIdentity EXTENSION_OPCODES[] = {
     {SMSG_VANITY_COLLECTION_ADDED, "SMSG_VANITY_COLLECTION_ADDED"},
     {SMSG_QUERY_CUSTOM_STORE_RESULT, "SMSG_QUERY_CUSTOM_STORE_RESULT"},
     {0x06FD, "CMSG_QUERY_INSTANCE_BINDS"},
-    {SMSG_CHARACTER_ADVANCEMENT_AUTHENTICATION, "SMSG_CHARACTER_ADVANCEMENT_AUTHENTICATION"},
+    {SMSG_CHARACTER_ADVANCEMENT_ACTIVE_SPEC, "SMSG_CHARACTER_ADVANCEMENT_ACTIVE_SPEC"},
+    {SMSG_CHARACTER_ADVANCEMENT_KNOWN_ENTRIES, "SMSG_CHARACTER_ADVANCEMENT_KNOWN_ENTRIES"},
+    {CMSG_CHARACTER_ADVANCEMENT_KNOWN_ENTRIES, "CMSG_CHARACTER_ADVANCEMENT_KNOWN_ENTRIES"},
     {0x0741, "CMSG_GOSSIP_CLOSE"},
     {0x0745, "CMSG_PLAYER_POLL_LIST_REQUEST"},
     {SMSG_BANK_PERMISSIONS, "SMSG_BANK_PERMISSIONS"},
@@ -235,6 +251,8 @@ constexpr uint32 SPELL_REAPER_SCYTHE_RUSH_MARKER = 500377;
 constexpr uint32 SPELL_REAPER_HARVEST_TIME = 803995;
 constexpr char ASCENSION_LOCAL_RESOURCE_PREFIX[] = "ASC_LOCAL_RESOURCE";
 constexpr char ASCENSION_ACTIVE_SPEC_SETTING[] = "core.ascension_active_spec";
+// A stored talent build per tree, "core.ascension_build.<spec>" with 0 for the class tree.
+constexpr char ASCENSION_TALENT_BUILD_SETTING_PREFIX[] = "core.ascension_build.";
 
 enum CompanionLoot : uint32
 {
@@ -269,7 +287,6 @@ constexpr std::array<std::pair<uint32, uint32>, 1> REAPER_ONE_SOUL_CONSUMERS =
     {500361, 500361} // Sanguine Orb
 }};
 
-constexpr uint8 VANITY_DELIVERY_ACTION = 2;
 constexpr std::size_t APPEARANCE_CATEGORY_COUNT = 69;
 constexpr uint32 APPEARANCE_CATEGORY_AMMUNITION = 32;
 // The copied 3.3.5 client supports the 23-bit extended world-packet header.
@@ -707,7 +724,7 @@ public:
             [spellId](auto const& entry) { return entry.ParentSpellId == spellId; });
     }
 
-    uint32 SynchronizeTaughtAbilities(Player* player)
+    uint32 SynchronizeTaughtAbilities(Player* player, bool beforeMap = false)
     {
         if (!IsAscensionCustomClass(player))
             return 0;
@@ -740,10 +757,13 @@ public:
             if (player->HasSpell(entry.SpellId))
                 ++learned;
         }
-        if (player->getClass() == CLASS_SON_OF_ARUGAL)
+        if (!beforeMap && player->getClass() == CLASS_SON_OF_ARUGAL)
         {
             // Native spec changes reconcile this flag, but removing a temporary
             // spell during a CAD refund does not. Preserve independently owned 674.
+            // The before-map pass leaves this to the OnPlayerLogin one: the saved
+            // inventory has already been validated by then, and unequipping an
+            // offhand before the player is in the world is a separate contract.
             bool const dualWield = player->HasSpell(674);
             if (player->CanDualWield() != dualWield)
             {
@@ -1235,25 +1255,692 @@ public:
     SynchronizeProgression(player);
     SynchronizeProficiencies(player);
     RepairStarterKit(player, false);
-    SendCharacterAdvancementAuthentication(player);
+    QueueCharacterAdvancementState(player);
+    SendCharacterAdvancementBridge(player);
+    SendLocalTalentState(player);
+
+    // Taught abilities (e.g. Eternal Curse 800157, AscensionTaughtAbilityData.h)
+    // are temporary spells and are never saved to character_spell, so
+    // Player::_LoadActions - which runs inside Player::LoadFromDB, before both
+    // PrepareTaughtAbilitiesBeforeMap and this hook - found them unknown and
+    // pruned their action bar slots for this login. Now that the grant has
+    // landed, reload the saved bar the same way Player::ActivateSpec does after
+    // a spec switch, so a still-eligible taught ability does not appear to fall
+    // off the action bar on every relog.
+    CharacterDatabasePreparedStatement* actionsStmt =
+        CharacterDatabase.GetPreparedStatement(CHAR_SEL_CHARACTER_ACTIONS_SPEC);
+    actionsStmt->SetData(0, player->GetGUID().GetRawValue());
+    actionsStmt->SetData(1, player->GetActiveSpec());
+
+    // That statement is prepared on asynchronous connections only, so a
+    // synchronous Query() asserts on a null MySQLPreparedStatement. The player
+    // can also leave before the response arrives, which is why the session -
+    // which owns this callback - resolves them instead of a captured pointer.
+    WorldSession* session = player->GetSession();
+    session->GetQueryProcessor().AddCallback(CharacterDatabase.AsyncQuery(actionsStmt)
+        .WithPreparedCallback([session](PreparedQueryResult result)
+        {
+            if (Player* owner = session->GetPlayer())
+                owner->LoadActions(result);
+        }));
   }
 
-  void SendCharacterAdvancementAuthentication(Player *player) {
-    WorldPacket packet(SMSG_CHARACTER_ADVANCEMENT_AUTHENTICATION,
-                       sizeof(uint32) * 2);
-    packet << uint32(0) << uint32(0);
+  /// Grant the taught abilities before the client's spell list goes out, the same
+  /// place and for the same reason the collection service prepares owned companions.
+  ///
+  /// They are granted as temporary spells, so they are never saved and have to be
+  /// granted again on every login. Doing that from OnPlayerLogin means the player is
+  /// already in the world, where Player::_addSpell announces the grant, and the client
+  /// reports learning them again on each relog although nothing changed. Outside the
+  /// world no such packet is sent and the replaced snapshot carries them instead.
+  ///
+  /// The OnPlayerLogin pass stays as it is: it skips whatever is already owned, and it
+  /// still covers a parent that is only granted once that later pass has run.
+  void PrepareTaughtAbilitiesBeforeMap(Player* player)
+  {
+    // This hook also runs on ordinary map changes, where the spellbook is already live.
+    if (!IsAscensionCustomClass(player) || player->IsInWorld() ||
+        !player->GetSession()->PlayerLoading())
+      return;
+
+    uint32 const specializationId = player->GetPlayerSetting(ASCENSION_ACTIVE_SPEC_SETTING, 0).value;
+    if (specializationId)
+    {
+        std::lock_guard<std::mutex> lock(_stateLock);
+        _activeSpecializations[player->GetGUID().GetCounter()] = specializationId;
+    }
+
+    if (uint32 const learned = SynchronizeTaughtAbilities(player, true))
+    {
+        player->SendInitialSpells();
+        LOG_INFO("module.ascension_compat",
+                 "Prepared {} taught abilities for {} before entering the world",
+                 learned, player->GetName());
+    }
+  }
+
+  static AscensionCompatData::CoATalentEntry const* FindTalentEntry(uint32 entryId)
+  {
+    auto const& entries = AscensionCompatData::CoATalentEntries;
+    auto itr = std::lower_bound(entries.begin(), entries.end(), entryId,
+        [](AscensionCompatData::CoATalentEntry const& entry, uint32 id) { return entry.EntryId < id; });
+    return itr != entries.end() && itr->EntryId == entryId ? &*itr : nullptr;
+  }
+
+  static AscensionCoATalentState::HasSpell SpellbookOf(Player const* player)
+  {
+    return [player](uint32 spellId) { return player->HasSpell(spellId); };
+  }
+
+  /// The catalog entries the character holds, at the rank its spellbook proves.
+  static std::vector<AscensionCoATalentState::KnownEntry> KnownTalentEntries(Player const* player)
+  {
+    return AscensionCoATalentState::KnownEntries(player->getClass(), SpellbookOf(player));
+  }
+
+  /// The client's character-advancement service keys its state off the local player object, which the
+  /// loading screen has not created yet while OnPlayerLogin runs: state sent then reaches no character.
+  /// CMSG_SET_ACTIVE_MOVER is the client saying that object now exists, so the state waits for the first one.
+  void QueueCharacterAdvancementState(Player* player)
+  {
+    std::lock_guard<std::mutex> lock(_stateLock);
+    _advancementPending.insert(player->GetGUID().GetCounter());
+    _advancementSent.erase(player->GetGUID().GetCounter());
+  }
+
+  void OnPlayerActiveMover(Player* player)
+  {
+    {
+      std::lock_guard<std::mutex> lock(_stateLock);
+      if (!_advancementPending.erase(player->GetGUID().GetCounter()))
+        return;
+      _advancementSent.insert(player->GetGUID().GetCounter());
+    }
+    SendCharacterAdvancementState(player);
+  }
+
+  /// The active specialization first: its handler builds the per-character container that the known-entries
+  /// handler refuses to fill without. The character's local specialization occupies the single slot 0, which
+  /// the client reports as specialization 1; the specialization id itself stays with the local UI.
+  void SendCharacterAdvancementState(Player* player)
+  {
+    WorldPacket packet(SMSG_CHARACTER_ADVANCEMENT_ACTIVE_SPEC, sizeof(uint32) * 2);
+    packet << uint32(0) << uint32(1);
     player->GetSession()->SendPacket(&packet);
 
+    uint32 const sent = SendKnownTalentEntries(player);
     LOG_INFO("module.ascension_compat",
-             "Initialized Character Advancement for {} (class {}, level {})",
-             player->GetName(), uint32(player->getClass()),
-             uint32(player->GetLevel()));
+             "Initialized Character Advancement for {} (class {}, level {}) with {} known entries",
+             player->GetName(), uint32(player->getClass()), uint32(player->GetLevel()), sent);
+  }
+
+  /// After a talent change: the complete set again, which the client diffs against what it holds, and the
+  /// bridge snapshot for the local layer. The native packet waits for the initial state, whose container
+  /// the known-entries handler needs.
+  void SendCharacterAdvancementKnownEntries(Player* player)
+  {
+    SendCharacterAdvancementBridge(player);
+    SendLocalTalentState(player);
+    {
+      std::lock_guard<std::mutex> lock(_stateLock);
+      if (!_advancementSent.count(player->GetGUID().GetCounter()))
+        return;
+    }
+    SendKnownTalentEntries(player);
+  }
+
+  /// The local Character Advancement layer in patch-B keeps the active specialization in a per-character
+  /// SavedVariable and rebuilds paid ranks from the spellbook, which cannot see hidden rank spells. The
+  /// server knows both, so it sends both as an addon-channel whisper from the character to itself, the
+  /// transport of the Runemaster Echoes bridge: the client delivers it to Lua as CHAT_MSG_ADDON and no one
+  /// else sees it. One chat packet carries a bounded payload, so the ranks are chunked; the sequence is
+  /// one-based and every chunk repeats the total, so a client that missed one knows its picture is
+  /// incomplete rather than reading a short list as missing ranks. Format and client half from #4030.
+  void SendCharacterAdvancementBridge(Player* player)
+  {
+    if (!player->GetSession())
+      return;
+
+    uint32 const specializationId = GetActiveSpecialization(player);
+    std::vector<std::string> ranks;
+    for (AscensionCoATalentState::KnownEntry const& known : KnownTalentEntries(player))
+      ranks.push_back(std::to_string(known.EntryId) + "," + std::to_string(known.Rank));
+
+    constexpr std::size_t maxPayload = 180;
+    std::vector<std::string> chunks;
+    std::string current;
+    for (std::string const& rank : ranks)
+    {
+      if (!current.empty() && current.size() + rank.size() + 1 > maxPayload)
+      {
+        chunks.push_back(current);
+        current.clear();
+      }
+      if (!current.empty())
+        current += ';';
+      current += rank;
+    }
+    if (!current.empty() || chunks.empty())
+      chunks.push_back(current);
+
+    for (std::size_t index = 0; index < chunks.size(); ++index)
+    {
+      std::string const message = "ASC_LOCAL_CAD\t1:" + std::to_string(specializationId) + ":" +
+          std::to_string(index + 1) + ":" + std::to_string(chunks.size()) + ":" + chunks[index];
+      WorldPacket packet;
+      ChatHandler::BuildChatPacket(packet, CHAT_MSG_WHISPER, LANG_ADDON, player->GetGUID(), player->GetGUID(),
+          message, 0, player->GetName(), player->GetName(), 0, false);
+      player->GetSession()->SendPacket(&packet);
+    }
+
+    LOG_DEBUG("module.ascension_compat",
+              "Sent Character Advancement bridge to {}: specialization {}, {} entries in {} message(s)",
+              player->GetName(), specializationId, uint32(ranks.size()), uint32(chunks.size()));
+  }
+
+  /// The same state in the three-message form the #4031 client half reads: ASC_LOCAL_SPEC (the active
+  /// specialization), ASC_LOCAL_RECORDS (whether a record exists per tree: here the server always has one,
+  /// an empty list meaning an empty tree) and ASC_LOCAL_TALENTS, one message of "entry:rank" pairs that the
+  /// client adopts whole, so it is never split. Automatic entries are left out: that client skips them, and
+  /// the message stays short. Either client half keeps working; one of the two forms retires with the client
+  /// patch that ships.
+  void SendLocalTalentState(Player* player)
+  {
+    if (!player->GetSession())
+      return;
+
+    auto send = [player](char const* prefix, std::string const& body)
+    {
+      std::string message = prefix;
+      message += '\t';
+      message += body;
+      WorldPacket packet;
+      ChatHandler::BuildChatPacket(packet, CHAT_MSG_WHISPER, LANG_ADDON, player->GetGUID(), player->GetGUID(),
+          message, 0, player->GetName(), player->GetName(), 0, false);
+      player->GetSession()->SendPacket(&packet);
+    };
+
+    std::string ranks;
+    for (AscensionCoATalentState::KnownEntry const& known : KnownTalentEntries(player))
+    {
+      AscensionCompatData::CoATalentEntry const* entry = FindTalentEntry(known.EntryId);
+      if (!entry || (!entry->AECost && !entry->TECost && !GetSelectableFreeGroup(entry->EntryId)))
+        continue;
+      if (!ranks.empty())
+        ranks += ' ';
+      ranks += std::to_string(known.EntryId) + ":" + std::to_string(known.Rank);
+    }
+
+    send("ASC_LOCAL_SPEC", std::to_string(GetActiveSpecialization(player)));
+    send("ASC_LOCAL_RECORDS", "1 1");
+    send("ASC_LOCAL_TALENTS", ranks);
+  }
+
+  uint32 SendKnownTalentEntries(Player* player)
+  {
+    std::vector<AscensionCoATalentState::KnownEntry> const known = KnownTalentEntries(player);
+    std::vector<uint8> const body = AscensionCoATalentState::KnownEntriesPayload(known);
+    WorldPacket packet(SMSG_CHARACTER_ADVANCEMENT_KNOWN_ENTRIES, body.size());
+    packet.append(body.data(), body.size());
+    player->GetSession()->SendPacket(&packet);
+    return uint32(known.size());
+  }
+
+  /// One owner for every rule a talent change obeys, whether it arrives as .localtalent or inside the client's
+  /// known-entries upload. False with the reason when the change is refused; the spellbook is then unchanged.
+  bool SetTalentRank(Player* player, AscensionCompatData::CoATalentEntry const& entry, uint32 rank,
+                     std::string& error, bool checkBudget = true)
+  {
+    uint32 const entryId = entry.EntryId;
+    if (entry.ClassId != player->getClass())
+    {
+      error = Acore::StringFormat("Talent entry {} does not belong to your custom class.", entryId);
+      return false;
+    }
+
+    uint32 activeSpecialization = GetActiveSpecialization(player);
+    if (rank > 0 && entry.SpecId != 0 && !activeSpecialization)
+    {
+      SwitchSpecialization(player, entry.SpecId);
+      activeSpecialization = GetActiveSpecialization(player);
+    }
+
+    if (rank > 0 && entry.SpecId != 0 && entry.SpecId != activeSpecialization)
+    {
+      error = Acore::StringFormat(
+          "Talent entry {} belongs to specialization {}, but your active local specialization is {}.",
+          entryId, uint32(entry.SpecId), activeSpecialization);
+      return false;
+    }
+
+    if (rank > entry.SpellCount)
+    {
+      error = Acore::StringFormat("Talent entry {} only has {} rank(s).", entryId, uint32(entry.SpellCount));
+      return false;
+    }
+
+    uint32 const freeChoiceGroup = GetSelectableFreeGroup(entryId);
+    bool const automaticallyGranted = entry.AECost == 0 && entry.TECost == 0 && !freeChoiceGroup;
+    if (automaticallyGranted && rank != 0 && rank != entry.SpellCount)
+    {
+      error = Acore::StringFormat("Progression entry {} must use its full automatic rank.", entryId);
+      return false;
+    }
+
+    if (rank > 0 && player->GetLevel() < entry.RequiredLevel)
+    {
+      error = Acore::StringFormat("Talent entry {} requires level {}.", entryId, uint32(entry.RequiredLevel));
+      return false;
+    }
+
+    if (automaticallyGranted)
+    {
+      // A UI synchronization request cannot bypass automatic prerequisites.
+      // Automatic ranks are immutable; paid talent choices remain below.
+      bool const grantable = rank == 0 || CanGrantAutomaticEntry(player, entry, activeSpecialization);
+      SynchronizeProgression(player);
+      if (!grantable)
+      {
+        error = Acore::StringFormat("Progression entry {} requires its prerequisite ability.", entryId);
+        return false;
+      }
+      return true;
+    }
+
+    uint32 const selectedSpellId = rank > 0 ? entry.SpellIds[rank - 1] : 0;
+    if (rank > 0 && (!selectedSpellId || !sSpellMgr->GetSpellInfo(selectedSpellId)))
+    {
+      error = Acore::StringFormat("Talent entry {} rank {} references a missing server spell.", entryId, rank);
+      return false;
+    }
+
+    // A rank above the one the spellbook proves costs points the tree may not have left. Removals and lower
+    // ranks always go through, so an over-budget character can always come back under it.
+    // A known-entries upload prices its whole set before applying it and skips this check per entry.
+    uint32 const currentRank = AscensionCoATalentState::KnownRank(entry, SpellbookOf(player));
+    if (checkBudget && rank > currentRank && (entry.AECost || entry.TECost))
+    {
+      uint32 classBudget = 0;
+      uint32 specializationBudget = 0;
+      if (!TalentBudget(player, classBudget, specializationBudget, error))
+        return false;
+
+      bool const classTree = entry.SpecId == 0;
+      AscensionCoATalentState::SpentPoints const spent =
+          AscensionCoATalentState::Spent(KnownTalentEntries(player));
+      uint32 const used = classTree ? spent.AE : spent.TE;
+      uint32 const budget = classTree ? classBudget : specializationBudget;
+      uint32 const cost = (rank - currentRank) * uint32(classTree ? entry.AECost : entry.TECost);
+      if (used + cost > budget)
+      {
+        error = Acore::StringFormat(
+            "Talent entry {} rank {} needs {} {} point(s), but {} of the {} available at level {} are spent.",
+            entryId, rank, cost, classTree ? "class" : "specialization", used, budget,
+            uint32(player->GetLevel()));
+        return false;
+      }
+    }
+
+    if (rank > 0 && freeChoiceGroup)
+    {
+      // An explicit player selection resolves a group. Login must not choose
+      // between alternatives previously double-granted by the old free rule.
+      for (auto const& other : AscensionCompatData::CoATalentEntries)
+        if (other.ClassId == player->getClass() && other.SpecId == entry.SpecId && other.EntryId != entryId &&
+            GetSelectableFreeGroup(other.EntryId) == freeChoiceGroup)
+          for (uint32 spellId : other.SpellIds)
+            if (spellId && player->HasSpell(spellId))
+              player->removeSpell(spellId, SPEC_MASK_ALL, false);
+    }
+
+    for (uint32 spellId : entry.SpellIds)
+      if (spellId && player->HasSpell(spellId))
+        player->removeSpell(spellId, SPEC_MASK_ALL, false);
+
+    if (rank > 0)
+      player->learnSpell(selectedSpellId, false);
+
+    SynchronizeProgression(player);
+
+    LOG_INFO("module.ascension_compat", "Set local CoA talent entry {} to rank {} for {} (class {})", entryId, rank,
+             player->GetName(), uint32(player->getClass()));
+    return true;
+  }
+
+  /// Reset Trees on the server: every paid rank of the class goes, automatic grants and the specialization
+  /// stay, and the progression pass restores whatever the remaining state entitles the character to.
+  uint32 ResetPaidTalents(Player* player)
+  {
+    uint32 removed = 0;
+    for (AscensionCompatData::CoATalentEntry const& entry : AscensionCompatData::CoATalentEntries)
+    {
+      if (entry.ClassId != player->getClass() || (!entry.AECost && !entry.TECost))
+        continue;
+      for (uint32 spellId : entry.SpellIds)
+        if (spellId && player->HasSpell(spellId))
+        {
+          player->removeSpell(spellId, SPEC_MASK_ALL, false);
+          ++removed;
+        }
+    }
+
+    SynchronizeProgression(player);
+    LOG_INFO("module.ascension_compat", "Reset {} paid CoA talent rank(s) for {} (class {})", removed,
+             player->GetName(), uint32(player->getClass()));
+    return removed;
+  }
+
+  /// The character's point budget, refused rather than assumed when the essence table has no row.
+  bool TalentBudget(Player const* player, uint32& classBudget, uint32& specializationBudget, std::string& error)
+  {
+    if (AscensionCompatData::GetCoATalentBudget(player->getClass(), player->GetLevel(), classBudget,
+                                                specializationBudget))
+      return true;
+
+    LOG_ERROR("module.ascension_compat", "No CoA talent budget row for class {} at level {} ({})",
+              uint32(player->getClass()), uint32(player->GetLevel()), player->GetName());
+    error = Acore::StringFormat("No talent budget is known for class {} at level {}; no rank can be raised.",
+                                uint32(player->getClass()), uint32(player->GetLevel()));
+    return false;
+  }
+
+  /// The rank the progression pass hands an entry back after its spells are removed: the highest rank whose
+  /// spell is also a class grant at the character's level. Such an entry stays held whatever the client
+  /// uploads, so an upload is priced with it.
+  static uint32 PersistentRank(Player const* player, AscensionCompatData::CoATalentEntry const& entry)
+  {
+    uint32 rank = 0;
+    for (uint32 index = 0; index < entry.SpellCount; ++index)
+    {
+      uint32 const spellId = entry.SpellIds[index];
+      bool const granted = spellId && std::any_of(AscensionCompatData::ClassSpells.begin(),
+          AscensionCompatData::ClassSpells.end(), [player, spellId](AscensionCompatData::ClassSpell const& spell)
+          {
+            return spell.ClassId == player->getClass() && spell.SpellId == spellId &&
+                   spell.RequiredLevel <= player->GetLevel();
+          });
+      if (granted)
+        rank = index + 1;
+    }
+    return rank;
+  }
+
+  /// The client's complete known set after a native learn or unlearn. Automatic entries are the server's to
+  /// grant and are ignored; every paid or free-choice entry is checked and the state the set leads to is priced
+  /// before any change lands, so a refused upload changes nothing. The resend of the server's state that
+  /// follows either outcome puts the client right.
+  bool ApplyKnownEntriesUpload(Player* player, std::vector<AscensionCoATalentState::KnownEntry> const& upload,
+                               std::string& error)
+  {
+    uint32 activeSpecialization = GetActiveSpecialization(player);
+    uint32 uploadedSpecialization = 0;
+    // A repeated entry keeps its last record, as the client's own store would.
+    std::unordered_map<uint32, uint32> wanted;
+    for (AscensionCoATalentState::KnownEntry const& item : upload)
+    {
+      AscensionCompatData::CoATalentEntry const* entry = FindTalentEntry(item.EntryId);
+      if (!entry || entry->ClassId != player->getClass())
+      {
+        error = Acore::StringFormat("Talent entry {} does not belong to your custom class.", item.EntryId);
+        return false;
+      }
+      if (!entry->AECost && !entry->TECost && !GetSelectableFreeGroup(entry->EntryId))
+        continue;
+      if (item.Rank > entry->SpellCount)
+      {
+        error = Acore::StringFormat("Talent entry {} only has {} rank(s).", entry->EntryId,
+                                    uint32(entry->SpellCount));
+        return false;
+      }
+      if (item.Rank > 0)
+      {
+        if (player->GetLevel() < entry->RequiredLevel)
+        {
+          error = Acore::StringFormat("Talent entry {} requires level {}.", entry->EntryId,
+                                      uint32(entry->RequiredLevel));
+          return false;
+        }
+        if (!sSpellMgr->GetSpellInfo(entry->SpellIds[item.Rank - 1]))
+        {
+          error = Acore::StringFormat("Talent entry {} rank {} references a missing server spell.",
+                                      entry->EntryId, item.Rank);
+          return false;
+        }
+        // Without an active specialization the upload selects one, as the first .localtalent does; it
+        // cannot select two.
+        if (entry->SpecId && activeSpecialization && entry->SpecId != activeSpecialization)
+        {
+          error = Acore::StringFormat(
+              "Talent entry {} belongs to specialization {}, but your active local specialization is {}.",
+              entry->EntryId, uint32(entry->SpecId), activeSpecialization);
+          return false;
+        }
+        if (entry->SpecId && !activeSpecialization)
+        {
+          if (uploadedSpecialization && uploadedSpecialization != entry->SpecId)
+          {
+            error = Acore::StringFormat("The uploaded build mixes specializations {} and {}.",
+                                        uploadedSpecialization, uint32(entry->SpecId));
+            return false;
+          }
+          uploadedSpecialization = entry->SpecId;
+        }
+      }
+      wanted[entry->EntryId] = item.Rank;
+    }
+
+    // Price the state the upload leads to: its own ranks, and for every other paid entry the rank the
+    // progression pass hands back once the upload has removed it.
+    std::vector<AscensionCoATalentState::KnownEntry> priced;
+    for (AscensionCompatData::CoATalentEntry const& entry : AscensionCompatData::CoATalentEntries)
+    {
+      if (entry.ClassId != player->getClass() || (!entry.AECost && !entry.TECost))
+        continue;
+      auto itr = wanted.find(entry.EntryId);
+      uint32 const rank = std::max(itr == wanted.end() ? 0 : itr->second, PersistentRank(player, entry));
+      if (rank)
+        priced.push_back({ entry.EntryId, rank });
+    }
+
+    uint32 classBudget = 0;
+    uint32 specializationBudget = 0;
+    if (!TalentBudget(player, classBudget, specializationBudget, error))
+      return false;
+    AscensionCoATalentState::SpentPoints const spent = AscensionCoATalentState::Spent(priced);
+    if (spent.AE > classBudget || spent.TE > specializationBudget)
+    {
+      error = Acore::StringFormat(
+          "That build spends {} class and {} specialization point(s); level {} has {} and {}.", spent.AE,
+          spent.TE, uint32(player->GetLevel()), classBudget, specializationBudget);
+      return false;
+    }
+
+    if (uploadedSpecialization && !SwitchSpecialization(player, uploadedSpecialization))
+    {
+      error = Acore::StringFormat("Specialization {} is not valid for your custom class.",
+                                  uploadedSpecialization);
+      return false;
+    }
+
+    // Removals first, so a swap never holds both talents at once.
+    std::vector<std::pair<AscensionCompatData::CoATalentEntry const*, uint32>> changes;
+    for (AscensionCompatData::CoATalentEntry const& entry : AscensionCompatData::CoATalentEntries)
+    {
+      if (entry.ClassId != player->getClass() ||
+          (!entry.AECost && !entry.TECost && !GetSelectableFreeGroup(entry.EntryId)))
+        continue;
+      auto itr = wanted.find(entry.EntryId);
+      uint32 const rank = itr == wanted.end() ? 0 : itr->second;
+      if (rank != AscensionCoATalentState::KnownRank(entry, SpellbookOf(player)))
+        changes.emplace_back(&entry, rank);
+    }
+    std::stable_sort(changes.begin(), changes.end(),
+                     [](auto const& left, auto const& right) { return (left.second == 0) > (right.second == 0); });
+    for (auto const& [entry, rank] : changes)
+      if (!SetTalentRank(player, *entry, rank, error, false))
+      {
+        // Every rule was checked above; the state resend covers whatever changed before this.
+        LOG_ERROR("module.ascension_compat",
+                  "Known-entries upload for {} failed after validation at entry {} rank {}: {}", player->GetName(),
+                  entry->EntryId, rank, error);
+        return false;
+      }
+    return true;
+  }
+
+  /// CanPacketReceiveEarly runs on the network thread, so the upload is copied and waits for the player's
+  /// own update before it touches the spellbook. Keyed by account: the player may be gone by then.
+  void QueueKnownEntriesUpload(uint32 accountId, WorldPacket const& packet)
+  {
+    std::lock_guard<std::mutex> lock(_stateLock);
+    std::deque<std::vector<uint8>>& queue = _pendingUploads[accountId];
+    if (queue.size() >= MAX_QUEUED_KNOWN_ENTRIES_UPLOADS)
+    {
+      LOG_WARN("module.ascension_compat", "Dropping known-entries upload for account {}: its queue is full",
+               accountId);
+      return;
+    }
+
+    std::vector<uint8> body;
+    if (packet.size())
+      body.assign(packet.contents(), packet.contents() + packet.size());
+    queue.push_back(std::move(body));
+  }
+
+  void ProcessKnownEntriesUploads(Player* player)
+  {
+    std::deque<std::vector<uint8>> uploads;
+    {
+      std::lock_guard<std::mutex> lock(_stateLock);
+      auto itr = _pendingUploads.find(player->GetSession()->GetAccountId());
+      if (itr == _pendingUploads.end())
+        return;
+      uploads = std::move(itr->second);
+      _pendingUploads.erase(itr);
+    }
+
+    if (!IsAscensionCustomClass(player))
+      return;
+    for (std::vector<uint8> const& body : uploads)
+      HandleKnownEntriesUpload(player, body);
+  }
+
+  void HandleKnownEntriesUpload(Player* player, std::vector<uint8> const& body)
+  {
+    std::vector<AscensionCoATalentState::KnownEntry> upload;
+    if (!AscensionCoATalentState::ParseKnownEntriesUpload(body.data(), body.size(), upload))
+    {
+      LOG_WARN("module.ascension_compat", "Malformed Ascension known-entries upload from {} payload={} bytes",
+               player->GetName(), body.size());
+    }
+    else
+    {
+      std::string error;
+      if (!ApplyKnownEntriesUpload(player, upload, error))
+      {
+        ChatHandler(player->GetSession()).SendSysMessage(error);
+        LOG_INFO("module.ascension_compat", "Refused known-entries upload of {} record(s) from {}: {}",
+                 upload.size(), player->GetName(), error);
+      }
+    }
+    SendCharacterAdvancementKnownEntries(player);
   }
 
   uint32 GetActiveSpecialization(Player const *player) const {
     std::lock_guard<std::mutex> lock(_stateLock);
     auto itr = _activeSpecializations.find(player->GetGUID().GetCounter());
     return itr == _activeSpecializations.end() ? 0 : itr->second;
+  }
+
+  // --- Stored builds ----------------------------------------------------------
+  //
+  // Ascension keeps a build per specialization and swaps between them. Here a switch removes every
+  // talent spell, so the build being left is written down first and the build of the specialization
+  // being entered is put back afterwards: the class tree, which every specialization shares, and the
+  // specialization's own tree. The spellbook stays the truth while a specialization is active; the
+  // record is only read when one is entered. Player setting "core.ascension_build.<spec>" (0 for the
+  // class tree): index 0 holds the count, then entryId * 10 + rank per pick (from #4031).
+
+  static std::string BuildSetting(uint32 specializationId)
+  {
+    return std::string(ASCENSION_TALENT_BUILD_SETTING_PREFIX) + std::to_string(specializationId);
+  }
+
+  /// The paid and free-choice ranks the spellbook holds on one tree, as entryId * 10 + rank.
+  static std::vector<uint32> LivePicks(Player const* player, uint32 specializationId)
+  {
+    std::vector<uint32> picks;
+    for (AscensionCompatData::CoATalentEntry const& entry : AscensionCompatData::CoATalentEntries)
+    {
+      if (entry.ClassId != player->getClass() || entry.SpecId != specializationId ||
+          (!entry.AECost && !entry.TECost && !GetSelectableFreeGroup(entry.EntryId)))
+        continue;
+      if (uint32 const rank = AscensionCoATalentState::KnownRank(entry, SpellbookOf(player)))
+        picks.push_back(entry.EntryId * 10 + rank);
+    }
+    return picks;
+  }
+
+  /// Writes a tree's picks over the previous record; a shorter build zeroes the old tail.
+  static void StoreBuild(Player* player, uint32 specializationId, std::vector<uint32> const& picks)
+  {
+    std::string const setting = BuildSetting(specializationId);
+    std::size_t previous = 0;
+    if (PlayerSettingVector const* values = player->FindPlayerSettings(setting))
+      previous = values->size();
+
+    player->UpdatePlayerSetting(setting, 0, uint32(picks.size()));
+    for (std::size_t index = 0; index < picks.size(); ++index)
+      player->UpdatePlayerSetting(setting, uint32(index) + 1, picks[index]);
+    for (std::size_t index = picks.size() + 1; index < previous; ++index)
+      player->UpdatePlayerSetting(setting, uint32(index), 0);
+  }
+
+  static std::vector<uint32> StoredBuild(Player const* player, uint32 specializationId)
+  {
+    std::vector<uint32> picks;
+    PlayerSettingVector const* values = player->FindPlayerSettings(BuildSetting(specializationId));
+    if (!values || values->empty())
+      return picks;
+
+    std::size_t const count = std::min<std::size_t>((*values)[0].value, values->size() - 1);
+    for (std::size_t index = 1; index <= count; ++index)
+      if (uint32 const pick = (*values)[index].value)
+        picks.push_back(pick);
+    return picks;
+  }
+
+  /// Writes down the class tree and the tree of the specialization being left.
+  void StoreBuilds(Player* player, uint32 specializationId)
+  {
+    StoreBuild(player, 0, LivePicks(player, 0));
+    StoreBuild(player, specializationId, LivePicks(player, specializationId));
+  }
+
+  /// Puts back the class tree and the entered specialization's tree, each rank through the rules of a
+  /// purchase, so a stored rank the character can no longer afford is skipped rather than granted.
+  uint32 RestoreBuilds(Player* player, uint32 specializationId)
+  {
+    uint32 restored = 0;
+    for (uint32 const tree : { uint32(0), specializationId })
+      for (uint32 const pick : StoredBuild(player, tree))
+      {
+        AscensionCompatData::CoATalentEntry const* entry = FindTalentEntry(pick / 10);
+        uint32 const rank = pick % 10;
+        if (!entry || entry->ClassId != player->getClass() || entry->SpecId != tree || !rank ||
+            rank > entry->SpellCount)
+          continue;
+        if (AscensionCoATalentState::KnownRank(*entry, SpellbookOf(player)) >= rank)
+          continue;
+
+        std::string error;
+        if (SetTalentRank(player, *entry, rank, error))
+          ++restored;
+        else
+          LOG_INFO("module.ascension_compat", "Stored talent entry {} rank {} not restored for {}: {}",
+                   entry->EntryId, rank, player->GetName(), error);
+      }
+    return restored;
   }
 
   bool SwitchSpecialization(Player *player, uint32 specializationId) {
@@ -1280,14 +1967,17 @@ public:
       }
       player->UpdatePlayerSetting(ASCENSION_ACTIVE_SPEC_SETTING, 0, specializationId);
 
+      uint32 const restored = previousSpecialization ? 0 : RestoreBuilds(player, specializationId);
       uint32 granted = SynchronizeProgression(player);
       LOG_INFO("module.ascension_compat",
-               "Synchronized {} (class {}) with local specialization {} and "
+               "Synchronized {} (class {}) with local specialization {}, restored {} stored rank(s) and "
                "granted {} missing automatic spells",
-               player->GetName(), uint32(player->getClass()), specializationId,
-               granted);
+               player->GetName(), uint32(player->getClass()), specializationId, restored, granted);
       return true;
     }
+
+    // The build being left survives only as a record: write it before its spells go.
+    StoreBuilds(player, previousSpecialization);
 
     // Like Player::ActivateSpec, dismiss the pet summoned under the old specialization.
     if (Pet* pet = player->GetPet())
@@ -1316,18 +2006,17 @@ public:
     }
     player->UpdatePlayerSetting(ASCENSION_ACTIVE_SPEC_SETTING, 0, specializationId);
 
+    uint32 const restored = RestoreBuilds(player, specializationId);
     uint32 granted = SynchronizeProgression(player);
     ChatHandler(player->GetSession())
         .PSendSysMessage(
-            "Activated specialization {}. Refunded all CoA talent points, "
-            "removed {} old talent spell(s), and granted {} automatic "
-            "ability/passive spell(s).",
-            specializationId, removed, granted);
+            "Activated specialization {}. Stored the build of specialization {}, removed {} old talent "
+            "spell(s), restored {} stored rank(s) and granted {} automatic ability/passive spell(s).",
+            specializationId, previousSpecialization, removed, restored, granted);
     LOG_INFO("module.ascension_compat",
-             "Switched {} (class {}) to local specialization {}: removed "
-             "{} CoA spells and granted {} automatic spells",
-             player->GetName(), uint32(player->getClass()), specializationId,
-             removed, granted);
+             "Switched {} (class {}) to local specialization {}: removed {} CoA spells, restored {} "
+             "stored ranks and granted {} automatic spells",
+             player->GetName(), uint32(player->getClass()), specializationId, removed, restored, granted);
     return true;
   }
 
@@ -1355,6 +2044,9 @@ public:
     _tuningUpdates.erase(player->GetGUID());
     _activeSpecializations.erase(player->GetGUID().GetCounter());
     _proficiencySynchronizations.erase(player->GetGUID().GetCounter());
+    _advancementPending.erase(player->GetGUID().GetCounter());
+    _advancementSent.erase(player->GetGUID().GetCounter());
+    _pendingUploads.erase(player->GetSession()->GetAccountId());
   }
 
     static uint32 GetSelectableFreeGroup(uint32 entryId)
@@ -1483,6 +2175,12 @@ private:
   std::unordered_map<ObjectGuid, uint32> _tuningUpdates;
   std::unordered_map<uint32, uint32> _activeSpecializations;
   std::unordered_set<uint32> _proficiencySynchronizations;
+  // Characters owed the character-advancement state, and those already holding it.
+  std::unordered_set<uint32> _advancementPending;
+  std::unordered_set<uint32> _advancementSent;
+  // Known-entries uploads by account, copied off the network thread for the player's own update.
+  static constexpr std::size_t MAX_QUEUED_KNOWN_ENTRIES_UPLOADS = 8;
+  std::unordered_map<uint32, std::deque<std::vector<uint8>>> _pendingUploads;
 };
 
 class AscensionResourceService
@@ -3456,9 +4154,6 @@ private:
       case CMSG_SET_CAN_SEE_APPEARANCES:
         HandleSetAppearanceVisibility(player, packet);
         break;
-      case CMSG_VANITY_DELIVERY:
-        HandleVanityDelivery(player, packet);
-        break;
       default:
         break;
       }
@@ -3556,16 +4251,6 @@ private:
 
     RefreshVisibleItems(player);
     SendAppearanceVisibility(player, *state);
-  }
-
-  void HandleVanityDelivery(Player *player, WorldPacket &packet) {
-    uint8 action = 0;
-    uint32 itemId = 0;
-    packet >> action >> itemId;
-    if (action != VANITY_DELIVERY_ACTION)
-      return;
-
-    DeliverLocalVanityItem(player, itemId);
   }
 
   void SaveActiveAppearances(Player *player,
@@ -4152,6 +4837,10 @@ public:
             !ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED))
             return true;
 
+        // The core keeps this packet; it only tells the module the client is out of its loading screen.
+        if (packet.GetOpcode() == CMSG_SET_ACTIVE_MOVER)
+            AscensionClassService::Instance().OnPlayerActiveMover(session->GetPlayer());
+
         if (packet.GetOpcode() == CMSG_GET_MIRRORIMAGE_DATA && packet.size() >= sizeof(uint64))
         {
             ObjectGuid guid = packet.read<ObjectGuid>(0);
@@ -4221,6 +4910,14 @@ public:
 
     uint32 opcode = packet.GetOpcode();
 
+    // This hook runs on the network thread: the upload waits for the player's own update.
+    if (opcode == CMSG_CHARACTER_ADVANCEMENT_KNOWN_ENTRIES)
+    {
+      if (session)
+        AscensionClassService::Instance().QueueKnownEntriesUpload(session->GetAccountId(), packet);
+      return false;
+    }
+
     // Ascension character-selection protocol: activate/deactivate and the
     // account sort order arrive on the character screen (STATUS_AUTHED, no
     // Player object) and are account-scoped.
@@ -4250,7 +4947,7 @@ public:
     if (opcode == CMSG_ANTICHEAT_ALERT)
       return true;
 
-    if (opcode == CMSG_CREATURE_ASSET_QUERY_MULTIPLE)
+    if (opcode == CMSG_CREATURE_QUERY_BULK)
     {
         constexpr uint32 maxCreatureQueries = 256;
         if (!session || packet.size() < sizeof(uint32))
@@ -4289,12 +4986,36 @@ public:
         return false;
     }
 
+    // -- Challenge / trial CMSGs (owner: mod-coa-challenges) ----------------
+    // Challenge-system CMSGs belong to mod-coa-challenges (late
+    // CanPacketReceive hook + core Handle_NULL fallback). Pass them through:
+    // this Early hook short-circuits the boolean-hook chain, so consuming
+    // them here would starve the challenge module of its own packets.
+    // Keep this list in sync with the COA CMSG block in Opcodes.h.
+    static constexpr std::array<uint32, 13> kChallengeCmsgs = {
+        CMSG_COA_START_CHALLENGE,          // 0x592 start challenge
+        CMSG_COA_STOP_CHALLENGE,           // 0x594 stop challenge
+        CMSG_COA_QUERY_FAILURES,           // 0x5A1 query challenge failures
+        CMSG_COA_SYNC_RESPONSE,            // 0x59C group sync response (u8 accept)
+        CMSG_COA_QUERY_COMPLETIONS,        // 0x5C6 query challenge completions
+        CMSG_COA_SAVE_TRIAL,               // 0x5A7 save custom trial
+        CMSG_COA_DELETE_TRIAL,             // 0x5A9 delete custom trial
+        CMSG_COA_QUERY_TRIALS,             // 0x5AB query custom-trial list
+        CMSG_COA_ACTIVATE_TRIAL,           // 0x5AD activate custom trial
+        CMSG_COA_DEACTIVATE_TRIAL,         // 0x5AF deactivate custom trial
+        CMSG_COA_RATE_TRIAL,               // 0x5BF rate/vote a trial (str + u8 + u8)
+        CMSG_COA_QUERY_TRIAL_COMPLETIONS,  // 0x5C9 query trial leaderboard (str)
+        CMSG_COA_TOGGLE_GAME_MODE,         // 0x5A4 toggle custom game mode
+    };
+    if (std::find(kChallengeCmsgs.begin(), kChallengeCmsgs.end(), opcode) !=
+        kChallengeCmsgs.end())
+      return true;
+
     if (QueueAscensionManastormPacket(session, packet))
       return false;
 
     if (opcode == CMSG_APPLY_APPEARANCES ||
-        opcode == CMSG_SET_CAN_SEE_APPEARANCES ||
-        opcode == CMSG_VANITY_DELIVERY) {
+        opcode == CMSG_SET_CAN_SEE_APPEARANCES) {
       AscensionCollectionService::Instance().QueueClientPacket(
           session->GetAccountId(), packet);
     }
@@ -4339,6 +5060,11 @@ public:
         {"reset", HandleSpellChargesResetCommand, SEC_PLAYER, Console::No},
         {"resync", HandleSpellChargesResyncCommand, SEC_PLAYER, Console::No}};
 
+    static ChatCommandTable localTalentCommandTable = {
+        {"reset", HandleLocalTalentResetCommand, SEC_PLAYER, Console::No},
+        {"sync", HandleLocalTalentSyncCommand, SEC_PLAYER, Console::No},
+        {"", HandleLocalTalentCommand, SEC_PLAYER, Console::No}};
+
     static ChatCommandTable commandTable = {
         {"localfreshcheck", HandleAscensionFreshCharacterCheck, SEC_ADMINISTRATOR, Console::Yes},
         {"localreloadpresets", HandleLocalReloadPresetsCommand, SEC_ADMINISTRATOR, Console::Yes},
@@ -4349,7 +5075,9 @@ public:
         {"localappearance", HandleLocalAppearanceCommand, SEC_PLAYER,
          Console::No},
         {"localvanity", HandleLocalVanityCommand, SEC_PLAYER, Console::No},
-        {"localtalent", HandleLocalTalentCommand, SEC_PLAYER, Console::No},
+        {"localtalent", localTalentCommandTable},
+        // The #4031 client half asks for the state under this name.
+        {"localspecstate", HandleLocalTalentSyncCommand, SEC_PLAYER, Console::No},
         {"localspec", HandleLocalSpecCommand, SEC_PLAYER, Console::No},
         {"localresource", HandleLocalResourceCommand, SEC_PLAYER,
          Console::No},
@@ -4531,112 +5259,52 @@ public:
     if (!player)
       return false;
 
-    auto itr = std::lower_bound(
-        AscensionCompatData::CoATalentEntries.begin(),
-        AscensionCompatData::CoATalentEntries.end(), entryId,
-        [](AscensionCompatData::CoATalentEntry const &entry, uint32 id) {
-          return entry.EntryId < id;
-        });
-    if (itr == AscensionCompatData::CoATalentEntries.end() ||
-        itr->EntryId != entryId) {
-      handler->PSendSysMessage(
-          "Talent entry {} is not in the local CoA catalog.", entryId);
+    AscensionCompatData::CoATalentEntry const* entry = AscensionClassService::FindTalentEntry(entryId);
+    if (!entry)
+    {
+      handler->PSendSysMessage("Talent entry {} is not in the local CoA catalog.", entryId);
       return true;
     }
 
-    if (itr->ClassId != player->getClass())
+    std::string error;
+    if (!AscensionClassService::Instance().SetTalentRank(player, *entry, rank, error))
     {
-      handler->PSendSysMessage(
-          "Talent entry {} does not belong to your custom class.", entryId);
+      handler->SendSysMessage(error);
       return true;
     }
 
-    uint32 activeSpecialization =
-        AscensionClassService::Instance().GetActiveSpecialization(player);
-    if (rank > 0 && itr->SpecId != 0 && !activeSpecialization)
-    {
-      AscensionClassService::Instance().SwitchSpecialization(player,
-                                                              itr->SpecId);
-      activeSpecialization =
-          AscensionClassService::Instance().GetActiveSpecialization(player);
-    }
+    AscensionClassService::Instance().SendCharacterAdvancementKnownEntries(player);
+    return true;
+  }
 
-    if (rank > 0 && itr->SpecId != 0 &&
-        itr->SpecId != activeSpecialization)
+  /// The state again, for a client whose listener loaded after the login push.
+  static bool HandleLocalTalentSyncCommand(ChatHandler* handler)
+  {
+    Player* player = handler->GetPlayer();
+    if (!player)
+      return false;
+
+    if (IsAscensionCustomClass(player))
+      AscensionClassService::Instance().SendCharacterAdvancementKnownEntries(player);
+    return true;
+  }
+
+  static bool HandleLocalTalentResetCommand(ChatHandler* handler)
+  {
+    Player* player = handler->GetPlayer();
+    if (!player)
+      return false;
+
+    if (!IsAscensionCustomClass(player))
     {
-      handler->PSendSysMessage(
-          "Talent entry {} belongs to specialization {}, but your active "
-          "local specialization is {}.",
-          entryId, uint32(itr->SpecId), activeSpecialization);
+      handler->SendSysMessage("Only a custom class has local CoA talents to reset.");
       return true;
     }
 
-    if (rank > itr->SpellCount)
-    {
-      handler->PSendSysMessage("Talent entry {} only has {} rank(s).", entryId,
-                               uint32(itr->SpellCount));
-      return true;
-    }
-
-    uint32 const freeChoiceGroup = AscensionClassService::GetSelectableFreeGroup(entryId);
-    bool const automaticallyGranted = itr->AECost == 0 && itr->TECost == 0 && !freeChoiceGroup;
-    if (automaticallyGranted && rank != 0 && rank != itr->SpellCount)
-    {
-      handler->PSendSysMessage(
-          "Progression entry {} must use its full automatic rank.", entryId);
-      return true;
-    }
-
-    if (rank > 0 && player->GetLevel() < itr->RequiredLevel)
-    {
-      handler->PSendSysMessage("Talent entry {} requires level {}.", entryId,
-                               uint32(itr->RequiredLevel));
-      return true;
-    }
-
-    if (automaticallyGranted)
-    {
-        // A UI synchronization request cannot bypass automatic prerequisites.
-        // Automatic ranks are immutable; paid talent choices remain below.
-        if (rank > 0 && !AscensionClassService::CanGrantAutomaticEntry(player, *itr, activeSpecialization))
-            handler->PSendSysMessage("Progression entry {} requires its prerequisite ability.", entryId);
-        AscensionClassService::Instance().SynchronizeProgression(player);
-        return true;
-    }
-
-    uint32 selectedSpellId = rank > 0 ? itr->SpellIds[rank - 1] : 0;
-    if (rank > 0 && (!selectedSpellId || !sSpellMgr->GetSpellInfo(selectedSpellId)))
-    {
-        handler->PSendSysMessage(
-            "Talent entry {} rank {} references a missing server spell.", entryId, rank);
-        return true;
-    }
-
-    if (rank > 0 && freeChoiceGroup)
-    {
-        // An explicit player selection resolves a group. Login must not choose
-        // between alternatives previously double-granted by the old free rule.
-        for (auto const& other : AscensionCompatData::CoATalentEntries)
-            if (other.ClassId == player->getClass() && other.SpecId == itr->SpecId && other.EntryId != entryId &&
-                AscensionClassService::GetSelectableFreeGroup(other.EntryId) == freeChoiceGroup)
-                for (uint32 spellId : other.SpellIds)
-                    if (spellId && player->HasSpell(spellId))
-                        player->removeSpell(spellId, SPEC_MASK_ALL, false);
-    }
-
-    for (uint32 spellId : itr->SpellIds) {
-      if (spellId && player->HasSpell(spellId))
-        player->removeSpell(spellId, SPEC_MASK_ALL, false);
-    }
-
-    if (rank > 0)
-        player->learnSpell(selectedSpellId, false);
-
-    AscensionClassService::Instance().SynchronizeProgression(player);
-
-    LOG_INFO("module.ascension_compat",
-             "Set local CoA talent entry {} to rank {} for {} (class {})",
-             entryId, rank, player->GetName(), uint32(player->getClass()));
+    uint32 const removed = AscensionClassService::Instance().ResetPaidTalents(player);
+    handler->PSendSysMessage("Reset {} CoA talent rank(s); every class and specialization point is available again.",
+                             removed);
+    AscensionClassService::Instance().SendCharacterAdvancementKnownEntries(player);
     return true;
   }
 
@@ -4651,6 +5319,8 @@ public:
       handler->PSendSysMessage(
           "Specialization {} is not valid for your custom class.",
           specializationId);
+    else
+      AscensionClassService::Instance().SendCharacterAdvancementKnownEntries(player);
     return true;
   }
 
@@ -4891,6 +5561,7 @@ public:
         {
             AscensionCollectionService::Instance().PrepareOwnedCompanionsBeforeMap(player);
             AscensionCollectionService::Instance().PrepareOwnedBankSpellsBeforeMap(player);
+            AscensionClassService::Instance().PrepareTaughtAbilitiesBeforeMap(player);
         }
     }
 
@@ -4962,6 +5633,7 @@ public:
     {
       AscensionClassService::Instance().SynchronizeProgression(player);
       AscensionClassService::Instance().SynchronizeProficiencies(player);
+      AscensionClassService::Instance().SendCharacterAdvancementKnownEntries(player);
 
       // Quest templates are shared globally, so scaling is serialized per
       // player. Refresh accepted quest query data when the player's effective
@@ -5058,6 +5730,7 @@ public:
   void OnPlayerUpdate(Player *player, uint32 diff) override {
     if (ascensionCompatConfig.GetConfigValue<bool>(
             AscensionCompatConfig::ENABLED)) {
+      AscensionClassService::Instance().ProcessKnownEntriesUploads(player);
       AscensionClassService::Instance().UpdateClassTuning(player, diff);
       AscensionResourceService::Instance().OnPlayerUpdate(player, diff);
       AscensionCollectionService::Instance().OnPlayerUpdate(player, diff);
@@ -5366,6 +6039,7 @@ public:
                     break;
             }
             ApplyAscensionClassMechanics(spellInfo);
+            ApplyAscensionPrimalistEarthquakeContract(spellInfo);
             ApplyAscensionPrimalistEarthshapingContracts(spellInfo);
             ApplyAscensionPrimalistSpiritBeastContract(spellInfo);
             ApplyAscensionPrimalistWeaponsContract(spellInfo);

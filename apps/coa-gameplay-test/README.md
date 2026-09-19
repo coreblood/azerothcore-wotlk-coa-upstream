@@ -5,8 +5,10 @@ The runtime component is `modules/mod-ascension-compat/src/CoAGameplayTest.cpp`;
 
 ## Run
 
-Windows, Python 3.11+, MySQL 8 client tools, a local MySQL server and a worldserver built with the runtime component
-are required. Follow the repository's build authorization rules. Adding the new source requires CMake
+Python 3.11+, MySQL 8 client tools, a local MySQL server and a worldserver built with the runtime component
+are required. The commands below run the runner directly (Windows example); Docker installations on Linux use
+the [Compose test service](#linux-docker), which provides all of them.
+Follow the repository's build authorization rules. Adding the new source requires CMake
 reconfiguration before building; running an older binary will fail the readiness check.
 The module requires Boost.PropertyTree headers. Component-based vcpkg installations need
 `boost-property-tree` for the same triplet as the existing Boost libraries. CMake checks this dependency.
@@ -39,16 +41,26 @@ The generated config binds the test worldserver to loopback on an unused port, u
 disables map worker threads and points all three database connections to isolated schemas. Source SQL updates
 run normally against the copies. Source configuration and the installed server are not changed. Relative
 `DataDir` is resolved against the binary's directory; use an absolute path when that differs from your setup.
-Module `.conf` files beside the source config (in `modules/`) are copied into the test directory's
-`configs/modules/` location used by the Windows server, then removed at the end. Their hashes appear in the
-summary. Use `--modules-config-dir` for a different source location. Module configs cannot override database
-isolation or harness controls. Other platforms require adapting module configuration discovery.
+Module `.conf` files beside the source config (in `modules/`) are copied into the directory the worldserver
+reads module configs from, then removed at the end. Use `--modules-config-dir` for a different source location.
+On Windows that directory is `configs/modules/` relative to the working directory (the test directory), the
+default. Elsewhere the worldserver reads `CONF_DIR/modules/`, fixed at build time, so `--server-modules-dir`
+is required; use an empty directory in an isolated test installation. Existing files there are never replaced,
+and additional `.conf` files are rejected so they cannot change the test settings. Copied file hashes appear
+in the summary. Module configs cannot override database isolation or harness controls.
+
+Source settings follow the server's precedence: an `AC_*` environment variable (for example `AC_DATA_DIR`)
+replaces the value in the source config. The test worldserver inherits the runner's environment except
+variables that would replace generated harness values, such as `AC_UPDATES_ENABLE_DATABASES` or
+`AC_LOGIN_DATABASE_INFO`, so the generated config always controls isolation, logging and updates.
 
 When the scenario ends, the runtime logs out its test players and shuts down. The runner waits for process
 exit before dropping the auth/character schemas, auditing the cached world and removing generated credentials.
-Startup, scenario, shutdown and copy operations have timeouts. An interrupted run performs the same cleanup;
-a hard termination may leave the named schemas and cache lease behind. Inspect `summary.json` and the lease
-before removing any leftovers.
+Credentials are written only to mode-600 option files and a generated `worldserver.conf` in a private temporary
+directory of the runner, never under the result directory; the directory is removed when the run ends.
+Startup, scenario, shutdown and copy operations have timeouts. An interrupted run (Ctrl+C, or SIGTERM as sent by `docker stop`/`compose stop`)
+performs the same cleanup. A hard termination or cleanup failure can leave schemas and a cache lease behind.
+Inspect `summary.json` and the lease before removing any leftovers.
 
 ## Reusing the world database
 
@@ -64,7 +76,8 @@ Add one of these options to the same `run` command when needed:
   verification when a completely fresh database is required. It also works with older harness binaries.
 
 The runner checks source table contents and definitions, repository SQL files under `data/sql/updates`,
-`data/sql/custom` and `modules`, and the source/main module configs. Changes refresh the cache automatically.
+`data/sql/custom` and `modules`, the source/main module configs and inherited `AC_*` settings. Changes refresh
+the cache automatically. Environment values enter only the fingerprint, never the cache metadata as plain text.
 Source SQL stored elsewhere needs an explicit `--refresh-world`. C++ edits and a new binary alone do not force
 a full copy. Cache ownership also includes the MySQL server identity, host, port and source world schema.
 
@@ -99,6 +112,55 @@ Results default to `.cache/coa-gameplay-tests/<run-id>/`:
 Exit code zero requires every expected assertion and step to complete, matching run identity, a clean server
 exit and successful cleanup/cache audit. A submitted cast alone is never a pass. Numeric fields in the server's
 property-tree JSON are strings; the Python runner converts and rechecks assertion values.
+
+### Linux (Docker)
+
+`docker/compose.yml` adds the `ac-gameplay-test` service to the root Compose stack. It uses the locally built
+worldserver image plus Python and shares the `ac-database` network namespace, so MySQL is reachable on
+`127.0.0.1` and the isolation checks are unchanged. The repository is mounted read-only (runner, scenarios and
+SQL updates), the live `DOCKER_VOL_ETC` configs are read-only sources, and `DOCKER_AC_ENV_FILE` applies the same
+`AC_*` settings as the live worldserver. The service selects the same `acore_auth`, `acore_characters` and
+`acore_world` source schemas as the root Compose stack, using `127.0.0.1:3306` inside the shared network namespace.
+Its database environment variables override any stale connections in `worldserver.conf` or the environment file.
+If another Compose override changes the live schema names, mirror those names in this service's
+`AC_*_DATABASE_INFO` variables while retaining the loopback endpoint. Build the worldserver image from the same
+checkout first, with the runtime module and cache startup barrier; rebuild the test image after it. A mounted
+source checkout does not update the compiled server. Build authorization is still required.
+
+```bash
+mkdir -p .cache/coa-gameplay-tests
+docker compose -f docker-compose.yml -f apps/coa-gameplay-test/docker/compose.yml --profile tests \
+  build ac-gameplay-test
+docker compose -f docker-compose.yml -f apps/coa-gameplay-test/docker/compose.yml --profile tests \
+  run --rm --no-deps ac-gameplay-test run apps/coa-gameplay-test/scenarios/frostbolt.json
+```
+
+Run these commands from the checkout that owns the running stack (matching project name and `.env`), or pass
+`--project-name`/`--env-file` explicitly. The example assumes the database is already healthy and configs and game
+data have been initialized. `--no-deps` prevents starting or changing dependencies. For `validate <scenario>`,
+also use `--no-deps` so Compose does not start MySQL; validation itself does not connect to it. The entrypoint fixes
+`--worldserver`, `--config`, `--modules-config-dir`, `--server-modules-dir`, `--mysql`, `--mysqldump`,
+`--database-client-config`, `--world-cache-dir` and `--output`; passing any of them after the scenario has no effect.
+The results mount also stores persistent cache metadata at `/results/world-cache`, corresponding to
+`.cache/coa-gameplay-tests/world-cache/` on the host. The default reuse, `--refresh-world` and `--fresh-databases`
+options have the same behavior as direct invocation. A clean retained world schema is intentional; only fresh
+mode drops all three schemas after each run. Cache lease PIDs and result paths refer to the container; verify the
+owning container has stopped before recovering a lease.
+
+The service connects as MySQL `root` with `DOCKER_DB_ROOT_PASSWORD` (it must not contain `"`, `;`, or a carriage
+return/line feed; the runner rejects such characters before connecting). Credentials are written only to
+mode-600 files in a private temporary directory inside the disposable container, never to the result
+directory. The runner removes its generated files during cleanup; the entrypoint's admin file disappears when
+the disposable container is removed (`--rm`). SIGTERM from `docker stop`/`compose stop` triggers cleanup,
+including the world audit; allow enough time for database checks (individual checksums can take five minutes).
+The service allows 15 minutes; for a manual stop use `docker stop -t 900 <container>`. A hard termination or
+cleanup failure may leave schemas or a lease behind; inspect `summary.json` and the lease. Results appear in
+`.cache/coa-gameplay-tests/<UTC timestamp with nanoseconds>/`. The service does not stop the running worldserver.
+
+With matching server sources, game data, source databases and effective config, Docker invokes the same Python
+runner and native runtime, including scenario validation, actions, assertions, SQL updates and cleanup. The
+skill's experiment design and result-inspection steps still apply. This does not validate client rendering or
+network login, and a static review alone cannot establish runtime parity between Windows and Linux binaries.
 
 ## Scenario format
 
@@ -165,7 +227,7 @@ a previously named snapshot of the same metric; it is available on snapshots and
 `ratio_to` then divides by a nonzero snapshot of the same metric, for comparisons such as boosted/base damage.
 `cast` accepts an optional `destination` with `x`, `y`, `z` to send an explicit ground target.
 
-Metrics: `health`, `max_health`, `power`, `max_power`, `alive`, `combat`, `casting`, `level`, `knows_spell`,
+Metrics: `health`, `max_health`, `power`, `max_power`, `alive`, `combat`, `casting`, `level`, `quest_objective_count` (needs `quest`, optional `index`), `knows_spell`,
 `has_talent`, `talent_points`, `cooldown_ms`, `item_count`, `bank_bag_slots`, `aura`, `aura_stacks`, `aura_charges`,
 `aura_duration_ms`, `aura_amount`, `pet_entry`, `pet_aura_stacks`, `owned_creature_count`,
 `charm_entry`, `charm_aura_stacks`, `controls_self`, `private_instance`, `dynamic_object`,
@@ -211,7 +273,7 @@ quantity reached inventory and records the item/count. It supports ordinary cont
 `loot_count` and `loot_entry` report the actor's current uncollected item slots and first entry; `loot_received`
 reports the inventory increase from its last successful `collect_loot`. Closed windows return zero slots/entry.
 `quest_rewarded` requires `quest` and reads the player's native rewarded status.
-`prepare_quest` takes `actor` and `quest`, adds the quest and required delivery items, then completes its objectives
+`prepare_quest` takes `actor` and `quest`, adds the quest and required delivery items, then completes its objectives (unless `complete` is false, which leaves the quest in progress)
 as fixture setup. `reward_quest` takes the same fields and optional zero-based `choice` (default 0); it checks normal
 reward eligibility and invokes native reward delivery. These actions do not test quest-giver interaction or objectives.
 `restore_quest_spells` takes `actor` and invokes the native restoration of spells from rewarded quests.

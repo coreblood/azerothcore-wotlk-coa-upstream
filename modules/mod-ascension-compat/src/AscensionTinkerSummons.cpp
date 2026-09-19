@@ -207,6 +207,15 @@ struct npc_ascension_tinker_pet : PetAI
         if (player && Permanent(me->GetEntry()))
         {
             events.Update(diff);
+            if (!initialized)
+            {
+                // The pet spawns passive, so it would stand beside the Tinker and never fight. Start it defensive
+                // like any other summoned pet; a stance the player picks afterwards is kept.
+                if (me->HasReactState(REACT_PASSIVE))
+                    me->SetReactState(REACT_DEFENSIVE);
+                if (CharmInfo* charmInfo = me->GetCharmInfo())
+                    charmInfo->SetPlayerReactState(me->GetReactState());
+            }
             if (!initialized || events.ExecuteEvent())
             {
                 Scale(player,me,!initialized);
@@ -370,19 +379,12 @@ struct npc_ascension_tinker_device : ScriptedAI
             return target && target->IsAlive() && player->IsValidAttackTarget(target) &&
                 me->IsWithinDistInMap(target,range) && me->CanSeeOrDetect(target) && me->IsWithinLOSInMap(target);
         };
-        if (Unit* target = ObjectAccessor::GetUnit(*me,focus); valid(target))
+        // The shared focus is updated by explicit hostile Tinker casts and by changes to
+        // the player's actual attack victim. It is deliberately not inferred from selection,
+        // combat membership or nearby hostility.
+        if (Unit* target = ObjectAccessor::GetUnit(*me,State(player).focus); valid(target))
             return target;
-        if (Unit* target = player->GetVictim(); valid(target))
-            return target;
-        // Spell and ranged attacks need not set the player's melee victim.
-        if (Unit* target = player->GetSelectedUnit(); valid(target) && player->IsInCombatWith(target))
-            return target;
-        Unit* nearest = nullptr;
-        for (Unit* target : Nearby(me,range))
-            if (valid(target) && (player->IsInCombatWith(target) || player->IsHostileTo(target)) &&
-                (!nearest || me->GetExactDist(target) < me->GetExactDist(nearest)))
-                nearest = target;
-        return nearest;
+        return nullptr;
     }
     void UpdateTurret(Player* player)
     {

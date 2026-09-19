@@ -10,13 +10,14 @@
 #include "SpellAuras.h"
 #include "SpellMgr.h"
 #include <algorithm>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 namespace AscensionStarcaller
 {
 namespace
 {
-std::unordered_map<ObjectGuid, StarcallerState> states;
+std::unordered_map<ObjectGuid, std::unique_ptr<StarcallerState>> states;
 std::mutex stateMutex;
 } // namespace
 Player* Owner(Unit const* unit)
@@ -27,7 +28,10 @@ Player* Owner(Unit const* unit)
 StarcallerState& State(Player* player)
 {
     std::lock_guard<std::mutex> lock(stateMutex);
-    return states[player->GetGUID()];
+    // The map is locked for the lookup only: the caller then reads and writes the state with no
+    // lock held. Kept by pointer, the state itself never moves, so an insert for another player
+    // rehashing the map cannot leave that caller writing into freed memory.
+    return *states.try_emplace(player->GetGUID(), std::make_unique<StarcallerState>()).first->second;
 }
 bool Named(SpellInfo const* info, uint32 root)
 {

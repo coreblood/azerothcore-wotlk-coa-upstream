@@ -25,7 +25,7 @@ def write_json(path, value):
     temporary.replace(path)
 
 
-def input_fingerprint(root, source_config, module_source):
+def input_fingerprint(root, source_config, module_source, environment=None):
     """Invalidate on SQL/config edits, including uncommitted updates, without tying reuse to a build."""
     paths = {source_config}
     paths.update(module_source.glob('*.conf'))
@@ -33,6 +33,11 @@ def input_fingerprint(root, source_config, module_source):
         if directory.exists():
             paths.update(directory.rglob('*.sql'))
     result = hashlib.sha256()
+    source = os.environ if environment is None else environment
+    # Environment settings take precedence over files, including gameplay and migration controls.
+    # Only the digest is persisted: database connection variables may contain credentials.
+    result.update(json.dumps({key: value for key, value in source.items() if key.startswith('AC_')},
+                             sort_keys=True).encode())
     for path in sorted(paths):
         result.update(str(path.resolve()).encode())
         with path.open('rb') as stream:
@@ -73,8 +78,9 @@ def world_fingerprint(database, name):
 
 
 class WorldCache:
-    def __init__(self, database, root, inputs):
+    def __init__(self, database, root, inputs, result_directory=None):
         self.database = database
+        self.result_directory = result_directory if result_directory is not None else database.directory
         source = database.connections['world']
         self.source = source.database
         # Include server identity so a different MySQL instance on the same port cannot inherit ownership.
@@ -104,7 +110,7 @@ class WorldCache:
                              'still own it. Use --fresh-databases for an independent run.') from None
         self.locked = True
         with stream:
-            json.dump({'runner_pid': os.getpid(), 'results': str(self.database.directory)}, stream)
+            json.dump({'runner_pid': os.getpid(), 'results': str(self.result_directory)}, stream)
 
     def verify_owner(self):
         require(self.name != self.source, 'Source and cached world must differ')

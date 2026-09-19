@@ -11,6 +11,8 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -34,7 +36,7 @@ METRICS = {
     'cast_speed_multiplier', 'spell_crit_chance', 'spell_power_cost', 'spell_damage_done', 'melee_damage_done',
     'who_count', 'who_class', 'loot_count', 'loot_entry', 'loot_received',
     'quest_rewarded', 'spell_damage_taken', 'melee_damage_taken',
-    'quest_status', 'quest_takeable', 'dialog_status',
+    'quest_status', 'quest_takeable', 'quest_objective_count', 'dialog_status',
     'ball_offer_count', 'ball_offers_quest',
     'ball_carried_count', 'ball_carried_quest', 'ball_turn_in_count', 'ball_turn_in_quest',
     'gossip_text',
@@ -53,7 +55,7 @@ PLAYER_STAT_METRICS = {
 }
 METRIC_FIELDS = {'actor', 'metric', 'spell', 'power', 'caster', 'effect', 'item', 'entry',
                  'relative_to', 'ratio_to', 'target', 'quest', 'id', 'stat', 'school', 'hand', 'rating', 'op',
-                 'base', 'key'}
+                 'base', 'key', 'index'}
 ACTIONS = {
     'console': ({'command'}, {'command'}),
     'command': ({'actor', 'command'}, {'actor', 'command'}),
@@ -72,7 +74,7 @@ ACTIONS = {
     'open_item': ({'actor', 'item'}, {'actor', 'item'}),
     'collect_loot': ({'actor'}, {'actor'}),
     'close_loot': ({'actor'}, {'actor'}),
-    'prepare_quest': ({'actor', 'quest'}, {'actor', 'quest'}),
+    'prepare_quest': ({'actor', 'quest'}, {'actor', 'quest', 'complete'}),
     'reward_quest': ({'actor', 'quest'}, {'actor', 'quest', 'choice'}),
     'restore_quest_spells': ({'actor'}, {'actor'}),
     'login_hooks': ({'actor'}, {'actor'}),
@@ -266,7 +268,7 @@ def validate(scenario):
             if metric == 'owned_creature_count':
                 require('entry' in step, f'{where}: metric needs creature entry')
                 require('caster' not in step or 'spell' in step, f'{where}: aura caster filter needs spell')
-            if metric in {'quest_status', 'quest_takeable'}:
+            if metric in {'quest_status', 'quest_takeable', 'quest_objective_count'}:
                 require('quest' in step, f'{where}: metric needs quest')
             if metric == 'dialog_status':
                 require('entry' in step, f'{where}: metric needs creature entry')
@@ -284,7 +286,7 @@ def validate(scenario):
                           'spell_damage_done', 'melee_damage_done',
                           'who_count', 'who_class',
                           'loot_count', 'loot_entry', 'loot_received', 'quest_rewarded',
-                          'quest_status', 'quest_takeable', 'dialog_status',
+                          'quest_status', 'quest_takeable', 'quest_objective_count', 'dialog_status',
                           'ball_offer_count', 'ball_offers_quest',
                           'ball_carried_count', 'ball_carried_quest',
                           'ball_turn_in_count', 'ball_turn_in_quest'} | PLAYER_STAT_METRICS:
@@ -326,6 +328,38 @@ def read_config(path):
             value = value.split('#', 1)[0].strip()
         values[key] = value
     return values
+
+
+def env_var_name(key):
+    """Mirror IniKeyToEnvVarKey in src/common/Configuration/Config.cpp."""
+    result = []
+    for index, char in enumerate(key):
+        if char in ' .-':
+            result.append('_')
+            continue
+        if index + 1 < len(key):
+            following = key[index + 1]
+            if ((not char.isupper() and following.isupper())
+                    or ('0' <= char <= '9') != ('0' <= following <= '9')):
+                result.append(char.upper() + '_')
+                continue
+        result.append(char.upper())
+    return 'AC_' + ''.join(result)
+
+
+def server_environment(overrides, environment=None):
+    """Keep inherited settings except variables that would replace generated harness values."""
+    blocked = {env_var_name(key) for key in overrides}
+    source = os.environ if environment is None else environment
+    return {name: value for name, value in source.items() if name not in blocked}
+
+
+def source_setting(config, key, default=None, environment=None):
+    """Read a source value as the server does: an AC_* environment variable replaces the file value."""
+    source = os.environ if environment is None else environment
+    value = source.get(env_var_name(key), config.get(key, default))
+    require(value is not None, f'Missing source setting: {key}')
+    return value
 
 
 @dataclass(frozen=True)
@@ -508,19 +542,31 @@ def write_config(source, destination, overrides):
     destination.chmod(0o600)
 
 
-def stage_modules(source, directory, reserved):
+def check_no_reserved_overrides(path, reserved):
+    settings = read_config(path)
+    require(not settings.keys() & reserved
+            and not any(key.startswith('CoAGameplayTest.') for key in settings),
+            f'Module config overrides harness controls: {path.name}')
+
+
+def stage_modules(source, destination, reserved):
+    """Copy module configs into the directory the worldserver reads, never replacing existing files."""
+    if destination.exists():
+        # Pre-existing files in the destination are never copied, but they must not silently win either.
+        for path in sorted(destination.glob('*.conf')):
+            check_no_reserved_overrides(path, reserved)
+            require((source / path.name).is_file(),
+                    f'Unexpected server module config: {path.name}; use an empty module config directory')
     staged = []
     try:
         for path in sorted(source.glob('*.conf')):
-            settings = read_config(path)
-            require(not settings.keys() & reserved
-                    and not any(key.startswith('CoAGameplayTest.') for key in settings),
-                    f'Module config overrides harness controls: {path.name}')
-            destination = directory / 'configs' / 'modules' / path.name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(path.read_bytes())
-            destination.chmod(0o600)
-            staged.append(destination)
+            check_no_reserved_overrides(path, reserved)
+            target = destination / path.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open('xb') as staged_file:
+                staged.append(target)
+                staged_file.write(path.read_bytes())
+            target.chmod(0o600)
         return staged
     except BaseException:
         for path in staged:
@@ -560,10 +606,11 @@ def check_report(report, run_id, scenario, returncode):
             require(record.get('status') == 'completed', 'An action did not complete')
 
 
-def run_process(command, directory, ready_path, result_path, run_id, startup_timeout, timeout, on_ready=None):
+def run_process(command, directory, ready_path, result_path, run_id, startup_timeout, timeout,
+                on_ready=None, environment=None):
     with (directory / 'worldserver.log').open('wb') as log:
         process = subprocess.Popen(command, cwd=directory, stdin=subprocess.PIPE, stdout=log, stderr=log,
-                                   creationflags=CREATE_FLAGS)
+                                   env=environment, creationflags=CREATE_FLAGS)
         start = time.monotonic()
         ready_at = None
         try:
@@ -618,7 +665,7 @@ def execute(args, scenario):
     mysql = args.mysql.resolve(strict=True)
     dump = args.mysqldump.resolve(strict=True)
     config = read_config(source_config)
-    connections = {role: Connection.parse(config[key]) for role, key in {
+    connections = {role: Connection.parse(source_setting(config, key)) for role, key in {
         'auth': 'LoginDatabaseInfo', 'characters': 'CharacterDatabaseInfo', 'world': 'WorldDatabaseInfo',
     }.items()}
     if args.database_client_config:
@@ -631,27 +678,30 @@ def execute(args, scenario):
     scenario_path = output / 'scenario.json'
     scenario_path.write_text(json.dumps(scenario, indent=2) + '\n', encoding='utf-8')
     print(f'Run {run_id}: {output}', flush=True)
-    generated_config = output / 'worldserver.conf'
+    # Credential-bearing files (option files, generated config) never live under `output`: on the Docker
+    # service that directory is a host bind mount, and on all platforms it is the disposable result directory.
+    credentials_dir = Path(tempfile.mkdtemp(prefix='coa-gameplay-test-'))
+    generated_config = credentials_dir / 'worldserver.conf'
     module_configs = []
     cache = None
     retain_databases = False
     summary = {'schema': 1, 'run_id': run_id, 'scenario': scenario['name'], 'status': 'failed',
                'binary_sha256': sha256(binary), 'scenario_sha256': sha256(scenario_path),
                'binary': str(binary)}
-    database = Databases(mysql, dump, output, connections, run_id)
+    database = Databases(mysql, dump, credentials_dir, connections, run_id)
     summary['databases'] = database.names
     try:
         module_source = args.modules_config_dir or source_config.parent / 'modules'
         if not args.fresh_databases:
             cache = WorldCache(database, args.world_cache_dir.resolve(),
-                               input_fingerprint(ROOT, source_config, module_source))
+                               input_fingerprint(ROOT, source_config, module_source), result_directory=output)
             summary['world_cache'] = cache.info
             cache.prepare(refresh=args.refresh_world)
         else:
             summary['world_cache'] = {'mode': 'fresh', 'retained': False}
         database.prepare(roles=('auth', 'characters') if cache else ('auth', 'characters', 'world'))
         summary['database_prepare_seconds'] = round(time.monotonic() - started, 3)
-        data_dir = Path(config.get('DataDir', '.'))
+        data_dir = Path(source_setting(config, 'DataDir', '.'))
         if not data_dir.is_absolute():
             data_dir = binary.parent / data_dir
         overrides = {
@@ -670,14 +720,17 @@ def execute(args, scenario):
             'CoAGameplayTest.ReadyFile': ready_path.as_posix(),
             'CoAGameplayTest.ResultFile': result_path.as_posix(),
         }
-        module_configs = stage_modules(module_source, output, set(overrides))
+        # Windows worldservers read configs/modules relative to their working directory, the output directory.
+        module_target = args.server_modules_dir or output / 'configs' / 'modules'
+        module_configs = stage_modules(module_source, module_target, set(overrides))
         summary['module_config_sha256'] = {path.name: sha256(path) for path in module_configs}
         write_config(source_config, generated_config, overrides)
         server_started = time.monotonic()
         on_ready = (lambda record: cache.ready(record, output / 'start.json', run_id)) if cache else None
         report, returncode = run_process([str(binary), '-c', str(generated_config)], output, ready_path,
                                          result_path, run_id, args.startup_timeout,
-                                         scenario.get('timeout_ms', 90000) / 1000 + 30, on_ready=on_ready)
+                                         scenario.get('timeout_ms', 90000) / 1000 + 30,
+                                         on_ready=on_ready, environment=server_environment(overrides))
         summary['server_seconds'] = round(time.monotonic() - server_started, 3)
         check_report(report, run_id, scenario, returncode)
         summary.update(status='passed', assertions=int(report['assertions']))
@@ -700,12 +753,18 @@ def execute(args, scenario):
         for path in module_configs:
             path.unlink(missing_ok=True)
         database.remove_credentials()
+        shutil.rmtree(credentials_dir, ignore_errors=True)
         summary['total_seconds'] = round(time.monotonic() - started, 3)
         (output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n', encoding='utf-8')
     print(f"{summary['status'].upper()}: {scenario['name']}\nResults: {output}")
     if 'message' in summary:
         print(summary['message'])
     return 0 if summary['status'] == 'passed' else 1
+
+
+def _raise_keyboard_interrupt(signum, frame):
+    """SIGTERM handler: route the ordinary Compose/`docker stop` signal through the existing interrupt cleanup."""
+    raise KeyboardInterrupt
 
 
 def main(argv=None):
@@ -722,6 +781,8 @@ def main(argv=None):
     run.add_argument('--database-client-config', type=Path,
                      help='Optional MySQL [client] file with credentials allowed to create/drop test schemas')
     run.add_argument('--modules-config-dir', type=Path, help='Defaults to the source config directory/modules')
+    run.add_argument('--server-modules-dir', type=Path,
+                     help='Directory the worldserver reads module configs from; required outside Windows')
     run.add_argument('--output', type=Path, help='New directory for logs and results')
     run.add_argument('--startup-timeout', type=float, default=600)
     mode = run.add_mutually_exclusive_group()
@@ -730,16 +791,26 @@ def main(argv=None):
     run.add_argument('--world-cache-dir', type=Path, default=ROOT / '.cache/coa-gameplay-tests/world-cache',
                      help='Local cache metadata/lease directory; database ownership is verified separately')
     args = parser.parse_args(argv)
+    previous_sigterm_handler = None
+    sigterm_installed = False
     try:
         scenario = validate(read_json(args.scenario))
         if args.command == 'validate':
             print(f"Valid scenario: {scenario['name']} ({len(scenario['steps'])} steps)")
             return 0
         require(math.isfinite(args.startup_timeout) and args.startup_timeout > 0, 'Invalid startup timeout')
+        require(args.server_modules_dir or os.name == 'nt',
+                '--server-modules-dir is required outside Windows (the worldserver reads CONF_DIR/modules)')
+        if hasattr(signal, 'SIGTERM'):
+            previous_sigterm_handler = signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+            sigterm_installed = True
         return execute(args, scenario)
     except (ValueError, OSError, KeyError, TypeError) as error:
         print(f'ERROR: {error}', file=sys.stderr)
         return 1
+    finally:
+        if sigterm_installed:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
 
 if __name__ == '__main__':

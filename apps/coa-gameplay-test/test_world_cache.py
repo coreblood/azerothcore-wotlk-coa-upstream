@@ -167,6 +167,13 @@ class WorldCacheTests(unittest.TestCase):
         self.assertTrue(first.lock.exists())
         first.finish()
 
+    def test_lease_points_to_results_instead_of_temporary_credentials(self):
+        results = self.directory / 'results'
+        cache = WorldCache(self.database, self.directory / 'cache', 'inputs', result_directory=results)
+        cache.prepare()
+        self.assertEqual(json.loads(cache.lock.read_text())['results'], str(results))
+        cache.finish()
+
     def test_unstoppable_child_retains_world_and_exclusive_lease(self):
         first = self.cache()
         first.prepare()
@@ -228,6 +235,16 @@ class WorldCacheTests(unittest.TestCase):
 
 
 class FingerprintTests(unittest.TestCase):
+    def test_environment_configuration_changes_invalidate_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = root / 'worldserver.conf'
+            config.write_text('Rate.XP.Kill = 1\n')
+            original = input_fingerprint(root, config, root, {'AC_RATE_XP_KILL': '1', 'PATH': 'old'})
+            self.assertEqual(original,
+                             input_fingerprint(root, config, root, {'AC_RATE_XP_KILL': '1', 'PATH': 'new'}))
+            self.assertNotEqual(original, input_fingerprint(root, config, root, {'AC_RATE_XP_KILL': '2'}))
+
     def test_inputs_include_sql_and_configs_but_not_binary_or_cpp_changes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
