@@ -659,13 +659,13 @@ enum PlayerSlots
 
 #define INVENTORY_SLOT_BAG_0    255
 
-enum EquipmentSlots                                         // 19 slots
+enum EquipmentSlots                                         // 22 slots
 {
     EQUIPMENT_SLOT_START        = 0,
     EQUIPMENT_SLOT_HEAD         = 0,
     EQUIPMENT_SLOT_NECK         = 1,
     EQUIPMENT_SLOT_SHOULDERS    = 2,
-    EQUIPMENT_SLOT_BODY         = 3,
+    EQUIPMENT_SLOT_EAR1         = 3,     // was BODY (shirt) - now earring slot
     EQUIPMENT_SLOT_CHEST        = 4,
     EQUIPMENT_SLOT_WAIST        = 5,
     EQUIPMENT_SLOT_LEGS         = 6,
@@ -674,14 +674,17 @@ enum EquipmentSlots                                         // 19 slots
     EQUIPMENT_SLOT_HANDS        = 9,
     EQUIPMENT_SLOT_FINGER1      = 10,
     EQUIPMENT_SLOT_FINGER2      = 11,
-    EQUIPMENT_SLOT_TRINKET1     = 12,
-    EQUIPMENT_SLOT_TRINKET2     = 13,
-    EQUIPMENT_SLOT_BACK         = 14,
-    EQUIPMENT_SLOT_MAINHAND     = 15,
-    EQUIPMENT_SLOT_OFFHAND      = 16,
-    EQUIPMENT_SLOT_RANGED       = 17,
-    EQUIPMENT_SLOT_TABARD       = 18,
-    EQUIPMENT_SLOT_END          = 19
+    EQUIPMENT_SLOT_FINGER3      = 12,   // new - 3rd ring slot
+    EQUIPMENT_SLOT_FINGER4      = 13,   // new - 4th ring slot
+    EQUIPMENT_SLOT_TRINKET1     = 14,
+    EQUIPMENT_SLOT_TRINKET2     = 15,
+    EQUIPMENT_SLOT_BACK         = 16,
+    EQUIPMENT_SLOT_MAINHAND     = 17,
+    EQUIPMENT_SLOT_OFFHAND      = 18,
+    EQUIPMENT_SLOT_RANGED       = 19,
+    EQUIPMENT_SLOT_EAR2         = 20,   // new - 2nd earring slot
+    EQUIPMENT_SLOT_TABARD       = 21,   // moved - now normal item with stats
+    EQUIPMENT_SLOT_END          = 22
 };
 
 enum InventorySlots                                         // 4 slots

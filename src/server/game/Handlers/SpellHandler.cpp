@@ -788,7 +788,6 @@ void WorldSession::HandleMirrorImageDataRequest(WorldPacket& recvData)
         {
             EQUIPMENT_SLOT_HEAD,
             EQUIPMENT_SLOT_SHOULDERS,
-            EQUIPMENT_SLOT_BODY,
             EQUIPMENT_SLOT_CHEST,
             EQUIPMENT_SLOT_WAIST,
             EQUIPMENT_SLOT_LEGS,

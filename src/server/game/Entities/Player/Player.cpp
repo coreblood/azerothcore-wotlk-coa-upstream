@@ -16541,8 +16541,8 @@ float Player::GetTotalItemLevel() const
 
     for (uint8 i = EQUIPMENT_SLOT_START; i < EQUIPMENT_SLOT_END; ++i)
     {
-        // don't check tabard, ranged, offhand or shirt
-        if (i == EQUIPMENT_SLOT_TABARD || i == EQUIPMENT_SLOT_RANGED || i == EQUIPMENT_SLOT_OFFHAND || i == EQUIPMENT_SLOT_BODY)
+        // don't check ranged or offhand
+        if (i == EQUIPMENT_SLOT_RANGED || i == EQUIPMENT_SLOT_OFFHAND)
             continue;
 
         if (m_items[i] && m_items[i]->GetTemplate())
@@ -16560,8 +16560,8 @@ float Player::GetAverageItemLevel()
 
     for (uint8 i = EQUIPMENT_SLOT_START; i < EQUIPMENT_SLOT_END; ++i)
     {
-        // don't check tabard, ranged, offhand or shirt
-        if (i == EQUIPMENT_SLOT_TABARD || i == EQUIPMENT_SLOT_RANGED || i == EQUIPMENT_SLOT_OFFHAND || i == EQUIPMENT_SLOT_BODY)
+        // don't check ranged or offhand
+        if (i == EQUIPMENT_SLOT_RANGED || i == EQUIPMENT_SLOT_OFFHAND)
             continue;
 
         if (m_items[i] && m_items[i]->GetTemplate())
@@ -16581,8 +16581,8 @@ float Player::GetAverageItemLevelForDF()
 
     for (int i = EQUIPMENT_SLOT_START; i < EQUIPMENT_SLOT_END; ++i)
     {
-        // don't check tabard, ranged, offhand or shirt
-        if (i == EQUIPMENT_SLOT_TABARD || i == EQUIPMENT_SLOT_RANGED || i == EQUIPMENT_SLOT_OFFHAND || i == EQUIPMENT_SLOT_BODY)
+        // don't check ranged or offhand
+        if (i == EQUIPMENT_SLOT_RANGED || i == EQUIPMENT_SLOT_OFFHAND)
             continue;
 
         if (m_items[i] && m_items[i]->GetTemplate())

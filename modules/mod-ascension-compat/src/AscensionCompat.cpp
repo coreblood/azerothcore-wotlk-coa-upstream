@@ -422,7 +422,8 @@ uint8 AppearanceCategoryForEquipmentSlot(uint8 slot) {
     return 4;
   case EQUIPMENT_SLOT_TABARD:
     return 5;
-  case EQUIPMENT_SLOT_BODY:
+  case EQUIPMENT_SLOT_EAR1:
+  case EQUIPMENT_SLOT_EAR2:
     return 6;
   case EQUIPMENT_SLOT_WRISTS:
     return 7;
@@ -1181,7 +1182,7 @@ public:
       {
         case INVTYPE_HEAD: slot = EQUIPMENT_SLOT_HEAD; break;
         case INVTYPE_SHOULDERS: slot = EQUIPMENT_SLOT_SHOULDERS; break;
-        case INVTYPE_BODY: slot = EQUIPMENT_SLOT_BODY; break;
+        case INVTYPE_BODY: slot = EQUIPMENT_SLOT_EAR1; break;
         case INVTYPE_CHEST:
         case INVTYPE_ROBE: slot = EQUIPMENT_SLOT_CHEST; break;
         case INVTYPE_WAIST: slot = EQUIPMENT_SLOT_WAIST; break;
