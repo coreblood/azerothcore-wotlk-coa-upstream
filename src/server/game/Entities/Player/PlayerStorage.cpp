@@ -2933,6 +2933,7 @@ Item* Player::EquipItem(uint16 pos, Item* pItem, bool update)
 
         ApplyEquipCooldown(pItem2);
         sScriptMgr->OnPlayerEquip(this, pItem2, bag, slot, update);
+        RecomputeBonusLayer(RECOMPUTE_GEAR_CHANGE);
         return pItem2;
     }
 
@@ -2942,6 +2943,7 @@ Item* Player::EquipItem(uint16 pos, Item* pItem, bool update)
 
     sScriptMgr->OnPlayerEquip(this, pItem, bag, slot, update);
     UpdateForQuestWorldObjects();
+    RecomputeBonusLayer(RECOMPUTE_GEAR_CHANGE);
     return pItem;
 }
 
@@ -3069,7 +3071,10 @@ void Player::RemoveItem(uint8 bag, uint8 slot, bool update)
             SetGuidValue(PLAYER_FIELD_INV_SLOT_HEAD + (slot * 2), ObjectGuid::Empty);
 
             if (slot < EQUIPMENT_SLOT_END)
+            {
                 SetVisibleItemSlot(slot, nullptr);
+                RecomputeBonusLayer(RECOMPUTE_GEAR_CHANGE);
+            }
         }
         else if (Bag* pBag = GetBagByPos(bag))
             pBag->RemoveItem(slot, update);
