@@ -29,10 +29,11 @@ LOCAL_HOSTS = {'127.0.0.1', 'localhost', '::1'}
 METRICS = {
     'health', 'health_pct', 'max_health', 'power', 'max_power', 'alive', 'combat', 'casting', 'level',
     'aura', 'aura_stacks', 'aura_charges', 'aura_duration_ms', 'aura_amount', 'aura_positive',
-    'knows_spell', 'has_talent', 'talent_points', 'cooldown_ms', 'item_count', 'bank_bag_slots',
-    'pet_entry', 'pet_aura_stacks', 'owned_creature_count',
+    'knows_spell', 'has_talent', 'talent_points', 'cooldown_ms', 'item_count', 'carried_item_count', 'bank_bag_slots',
+    'taxi_node', 'pet_entry', 'pet_aura_stacks', 'owned_creature_count',
     'charm_entry', 'charm_aura_stacks', 'controls_self', 'private_instance',
     'dynamic_object', 'dynamic_object_duration_ms', 'gossip_options',
+    'owned_gameobject_count', 'gameobject_remaining_ms', 'at_homebind',
     'cast_speed_multiplier', 'spell_crit_chance', 'spell_power_cost', 'spell_damage_done', 'melee_damage_done',
     'who_count', 'who_class', 'loot_count', 'loot_entry', 'loot_received',
     'quest_rewarded', 'spell_damage_taken', 'melee_damage_taken',
@@ -40,18 +41,23 @@ METRICS = {
     'ball_offer_count', 'ball_offers_quest',
     'ball_carried_count', 'ball_carried_quest', 'ball_turn_in_count', 'ball_turn_in_quest',
     'gossip_text',
-    'stat', 'attack_power', 'ranged_attack_power', 'armor', 'resistance', 'attack_time_ms', 'run_speed_rate',
+    'stat', 'attack_power', 'ranged_attack_power', 'armor', 'weapon_damage_min', 'resistance',
+    'attack_time_ms', 'run_speed_rate',
     'aura_amplitude_ms', 'melee_crit_chance', 'dodge_chance', 'parry_chance', 'expertise', 'combat_rating',
     'spell_modifier', 'spell_cast_time_ms', 'spell_max_range', 'spell_max_stacks', 'spell_healing_done',
     'aura_crit_chance', 'aura_script_value', 'melee_hit_chance', 'spell_hit_chance', 'spell_power',
     'spell_done_crit_chance', 'melee_spell_damage_done', 'script_melee_damage_taken',
     'script_spell_damage_taken', 'script_periodic_damage_taken', 'spell_effect_value',
+    'block_chance', 'block_value', 'critical_block_chance', 'spell_critical_damage', 'armor_reduced_damage',
+    'aoe_damage_taken', 'reputation_gain', 'spell_immune', 'spell_effect_immune', 'melee_attack_count',
 }
 PLAYER_STAT_METRICS = {
     'melee_crit_chance', 'dodge_chance', 'parry_chance', 'expertise', 'combat_rating',
     'spell_modifier', 'spell_cast_time_ms', 'spell_max_range', 'spell_max_stacks', 'spell_healing_done',
     'melee_hit_chance', 'spell_hit_chance', 'spell_power', 'spell_done_crit_chance', 'melee_spell_damage_done',
     'script_melee_damage_taken', 'script_spell_damage_taken', 'script_periodic_damage_taken', 'spell_effect_value',
+    'block_chance', 'block_value', 'critical_block_chance', 'spell_critical_damage', 'armor_reduced_damage',
+    'aoe_damage_taken', 'reputation_gain', 'spell_immune', 'spell_effect_immune', 'melee_attack_count',
 }
 METRIC_FIELDS = {'actor', 'metric', 'spell', 'power', 'caster', 'effect', 'item', 'entry',
                  'relative_to', 'ratio_to', 'target', 'quest', 'id', 'stat', 'school', 'hand', 'rating', 'op',
@@ -67,6 +73,7 @@ ACTIONS = {
     'set_aura': ({'actor', 'spell', 'stacks'}, {'actor', 'spell', 'stacks'}),
     'cast': ({'actor', 'spell'}, {'actor', 'spell', 'target', 'destination'}),
     'attack': ({'actor', 'target'}, {'actor', 'target'}),
+    'group': ({'actor', 'target'}, {'actor', 'target'}),
     'cast_charm': ({'actor', 'spell'}, {'actor', 'spell', 'target'}),
     'gossip_hello': ({'actor'}, {'actor', 'target'}),
     'gossip_select': ({'actor', 'option'}, {'actor', 'option'}),
@@ -82,7 +89,8 @@ ACTIONS = {
     'reset_talents': ({'actor'}, {'actor'}),
     'add_item': ({'actor', 'item'}, {'actor', 'item', 'count'}),
     'equip': ({'actor', 'item', 'slot'}, {'actor', 'item', 'slot'}),
-    'use_item': ({'actor', 'item', 'spell'}, {'actor', 'item', 'spell', 'target'}),
+    'use_item': ({'actor', 'item', 'spell'}, {'actor', 'item', 'spell', 'target', 'destination'}),
+    'use_gameobject': ({'actor', 'entry'}, {'actor', 'entry'}),
     'set_level': ({'actor', 'value'}, {'actor', 'value'}),
     'set_health': ({'actor', 'value'}, {'actor', 'value'}),
     'set_power': ({'actor', 'value'}, {'actor', 'value', 'power'}),
@@ -222,6 +230,9 @@ def validate(scenario):
                 number(step[key], f'{where}.{key}', 0, 2**32 - 1, True)
         if action == 'who' and 'target' in step:
             require(step['target'] in player_ids, f'{where}: Who name filter needs a player')
+        if action == 'group':
+            require(step['target'] in player_ids and step['target'] != step['actor'],
+                    f'{where}: group needs another player')
         for key in ('ms', 'within_ms'):
             if key in step:
                 number(step[key], f'{where}.{key}', 0, scenario.get('timeout_ms', 90000), True)
@@ -238,10 +249,12 @@ def validate(scenario):
                     'spell_damage_done', 'spell_damage_taken', 'spell_modifier', 'spell_cast_time_ms',
                     'spell_max_range', 'spell_max_stacks', 'spell_healing_done', 'spell_done_crit_chance',
                     'melee_spell_damage_done', 'script_spell_damage_taken', 'script_periodic_damage_taken',
-                    'spell_effect_value'}:
+                    'spell_effect_value', 'spell_critical_damage', 'armor_reduced_damage',
+                    'spell_immune', 'spell_effect_immune'}:
                 require('spell' in step, f'{where}: metric needs spell')
             if metric in {'spell_damage_done', 'melee_damage_done', 'spell_damage_taken', 'melee_damage_taken',
-                          'spell_healing_done', 'spell_done_crit_chance', 'melee_spell_damage_done'} \
+                          'spell_healing_done', 'spell_done_crit_chance', 'melee_spell_damage_done',
+                          'spell_critical_damage', 'armor_reduced_damage', 'spell_immune', 'spell_effect_immune'} \
                     or metric.startswith('script_'):
                 require('target' in step, f'{where}: damage metric needs target')
             if metric == 'stat':
@@ -252,6 +265,10 @@ def validate(scenario):
                 number(step.get('school'), f'{where}.school', 1, 6, True)
             if metric == 'combat_rating':
                 number(step.get('rating'), f'{where}.rating', 0, 24, True)
+            if metric == 'aoe_damage_taken':
+                number(step.get('school'), f'{where}.school', 0, 6, True)
+            if metric == 'reputation_gain':
+                require('id' in step, f'{where}: reputation metric needs faction id')
             if metric == 'spell_modifier':
                 number(step.get('op'), f'{where}.op', 0, 31, True)
                 number(step.get('base'), f'{where}.base')
@@ -268,20 +285,26 @@ def validate(scenario):
             if metric == 'owned_creature_count':
                 require('entry' in step, f'{where}: metric needs creature entry')
                 require('caster' not in step or 'spell' in step, f'{where}: aura caster filter needs spell')
+            if metric in {'owned_gameobject_count', 'gameobject_remaining_ms'}:
+                require('entry' in step, f'{where}: metric needs gameobject entry')
             if metric in {'quest_status', 'quest_takeable', 'quest_objective_count'}:
                 require('quest' in step, f'{where}: metric needs quest')
             if metric == 'dialog_status':
                 require('entry' in step, f'{where}: metric needs creature entry')
+            if metric == 'taxi_node':
+                number(step.get('entry'), f'{where}.entry', 1, 2**31 - 1, True)
             if metric == 'ball_offers_quest':
                 require('quest' in step, f'{where}: metric needs quest')
             if metric in {'ball_carried_quest', 'ball_turn_in_quest'}:
                 require('quest' in step, f'{where}: metric needs quest')
             if metric == 'gossip_text':
                 require('id' in step, f'{where}: metric needs text id')
-            if metric in {'knows_spell', 'has_talent', 'talent_points', 'cooldown_ms', 'item_count', 'bank_bag_slots',
+            if metric in {'knows_spell', 'has_talent', 'talent_points', 'cooldown_ms', 'item_count',
+                          'carried_item_count', 'bank_bag_slots', 'taxi_node',
                           'pet_entry', 'pet_aura_stacks', 'owned_creature_count', 'charm_entry',
                           'charm_aura_stacks', 'controls_self', 'private_instance',
                           'dynamic_object', 'dynamic_object_duration_ms', 'gossip_options',
+                          'owned_gameobject_count', 'gameobject_remaining_ms', 'at_homebind',
                           'cast_speed_multiplier', 'spell_crit_chance', 'spell_power_cost',
                           'spell_damage_done', 'melee_damage_done',
                           'who_count', 'who_class',
