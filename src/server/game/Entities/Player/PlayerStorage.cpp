@@ -5508,6 +5508,9 @@ bool Player::LoadFromDB(ObjectGuid playerGuid, CharacterDatabaseQueryHolder cons
     InitTaxiNodesForLevel();
     InitRunes();
 
+    // Initialize bonus layer from ledger
+    RecomputeBonusLayer(RECOMPUTE_LOGIN);
+
     sScriptMgr->OnPlayerLoadFromDB(this);
 
     // make sure the unit is considered out of combat for proper loading

@@ -17307,3 +17307,21 @@ void Player::SendSystemMessage(std::string_view msg, bool escapeCharacters)
 {
     ChatHandler(GetSession()).SendSysMessage(msg, escapeCharacters);
 }
+
+void Player::RecomputeBonusLayer(RecomputeReason reason)
+{
+    if (!m_bonusLayer)
+    {
+        m_bonusLayer = std::make_unique<BonusLayer>(GetGUID().GetCounter());
+        m_bonusLayer->Initialize();
+        return;
+    }
+    m_bonusLayer->Recompute(reason);
+}
+
+int32 Player::GetBonusValue(const std::string& fieldName)
+{
+    if (!m_bonusLayer)
+        return 0;
+    return m_bonusLayer->GetEffectiveValue(fieldName);
+}

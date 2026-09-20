@@ -20,6 +20,7 @@
 
 #include "ArenaTeam.h"
 #include "Battleground.h"
+#include "BonusLayer.h"
 #include "CharmInfo.h"
 #include "CharacterCache.h"
 #include "CinematicMgr.h"
@@ -2013,6 +2014,11 @@ public:
 
     void UpdateDefenseBonusesMod();
     inline void RecalculateRating(CombatRating cr) { ApplyRatingMod(cr, 0, true);}
+
+    BonusLayer* GetBonusLayer() { return m_bonusLayer.get(); }
+    void RecomputeBonusLayer(RecomputeReason reason);
+    int32 GetBonusValue(const std::string& fieldName);
+
     float GetMeleeCritFromAgility();
     void GetDodgeFromAgility(float& diminishing, float& nondiminishing);
     [[nodiscard]] float GetMissPercentageFromDefence() const;
@@ -3152,6 +3158,8 @@ private:
     bool _expectingChangeTransport;
     uint32 _pendingFlightChangeCounter;
     uint32 _mapChangeOrderCounter;
+
+    std::unique_ptr<BonusLayer> m_bonusLayer;
 };
 
 void AddItemsSetItem(Player* player, Item* item);
