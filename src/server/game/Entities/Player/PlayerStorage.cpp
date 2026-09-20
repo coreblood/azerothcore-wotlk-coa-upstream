@@ -170,6 +170,8 @@ uint8 Player::FindEquipSlot(ItemTemplate const* proto, uint32 slot, bool swap) c
         case INVTYPE_FINGER:
             slots[0] = EQUIPMENT_SLOT_FINGER1;
             slots[1] = EQUIPMENT_SLOT_FINGER2;
+            slots[2] = EQUIPMENT_SLOT_FINGER3;
+            slots[3] = EQUIPMENT_SLOT_FINGER4;
             break;
         case INVTYPE_TRINKET:
             slots[0] = EQUIPMENT_SLOT_TRINKET1;
