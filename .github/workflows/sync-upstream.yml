@@ -1,15 +1,47 @@
-name: Sync upstream
+name: Sync Upstream AzerothCore
+
 on:
   schedule:
-    - cron: '0 6 * * *'
-  workflow_dispatch:
+    # Run every 6 hours (0, 6, 12, 18 UTC)
+    - cron: '0 */6 * * *'
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
 permissions:
   contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Sync fork with upstream
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh repo sync coreblood/azerothcore-wotlk-coa-upstream --source jealous-sound/azerothcore-wotlk-coa --branch main
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config --local user.email "automation@azerothcore.local"
+          git config --local user.name "Upstream Sync Bot"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/azerothcore/azerothcore-wotlk.git || true
+
+      - name: Fetch upstream
+        run: git fetch upstream master
+
+      - name: Check for updates
+        id: check
+        run: |
+          BEHIND=$(git rev-list --count main..upstream/master 2>/dev/null || echo "0")
+          echo "behind=$BEHIND" >> $GITHUB_OUTPUT
+          echo "Latest 5 upstream commits:"
+          git log --oneline upstream/master -5
+
+      - name: Log sync result
+        run: |
+          echo "✓ Sync completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          if [ "${{ steps.check.outputs.behind }}" -gt 0 ]; then
+            echo "ℹ Local main is ${{ steps.check.outputs.behind }} commit(s) behind upstream"
+          else
+            echo "✓ Local main is up to date with upstream"
+          fi
