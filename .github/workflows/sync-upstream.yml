@@ -37,11 +37,37 @@ jobs:
           echo "Latest 5 upstream commits:"
           git log --oneline upstream/master -5
 
+      - name: Merge upstream if updates available
+        if: steps.check.outputs.behind > 0
+        id: merge
+        run: |
+          git checkout main
+          git merge --no-edit upstream/master
+          echo "✓ Merged ${{ steps.check.outputs.behind }} commit(s) from upstream"
+
+      - name: Push merged changes
+        if: steps.check.outputs.behind > 0
+        run: git push origin main
+
+      - name: Handle merge conflict
+        if: failure() && steps.merge.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Merge Conflict: Upstream AzerothCore',
+              body: `Automatic merge from upstream/master into main failed due to conflicts.\n\nPlease resolve manually:\n\n\`\`\`bash\ngit fetch origin main\ngit merge upstream/master\n# resolve conflicts\ngit commit\ngit push origin main\n\`\`\``,
+              labels: ['upstream-sync', 'conflict']
+            });
+
       - name: Log sync result
+        if: always()
         run: |
           echo "✓ Sync completed at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           if [ "${{ steps.check.outputs.behind }}" -gt 0 ]; then
-            echo "ℹ Local main is ${{ steps.check.outputs.behind }} commit(s) behind upstream"
+            echo "✓ Merged ${{ steps.check.outputs.behind }} commit(s) from upstream"
           else
-            echo "✓ Local main is up to date with upstream"
+            echo "✓ Already up to date with upstream"
           fi
