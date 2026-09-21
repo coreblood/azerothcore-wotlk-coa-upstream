@@ -40,6 +40,7 @@
 #include "GameObjectAI.h"
 #include "GameTime.h"
 #include "GridNotifiersImpl.h"
+#include "LocalLevelScaling.h"
 #include "Group.h"
 #include "Log.h"
 #include "MapMgr.h"
@@ -462,6 +463,12 @@ Unit::Unit() : WorldObject(),
 // Methods of class Unit
 Unit::~Unit()
 {
+    // Whatever still follows this unit holds a raw pointer to it and will touch that pointer from its
+    // own destructor, through AbstractFollower::SetTarget. RemoveFromWorld() detaches them, but nothing
+    // guarantees it ran: a unit destroyed by another path, or while a follower of its own is being
+    // destroyed on another map thread, leaves them pointing at memory that is about to be freed.
+    RemoveAllFollowers();
+
     // set current spells as deletable
     for (uint8 i = 0; i < CURRENT_MAX_SPELL; ++i)
         if (m_currentSpells[i])
@@ -2234,6 +2241,14 @@ uint32 Unit::CalcArmorReducedDamage(Unit const* attacker, Unit const* victim, co
 {
     float armor = float(victim->GetArmor());
 
+    // Armor is one of the per-level creature rows, so a character fighting their own version of a
+    // creature has to meet *that* version's armor - otherwise a creature shown at level 57 is
+    // defended like the level 2 creature it actually is, and the blow lands as if it were undefended.
+    if (Creature const* creature = victim->ToCreature())
+        if (Player* viewer = attacker ? attacker->GetCharmerOrOwnerPlayerOrPlayerItself() : nullptr)
+            if (auto const viewArmor = LocalLevelScaling::ViewArmorFor(viewer, creature))
+                armor = float(*viewArmor);
+
     // Ignore enemy armor by SPELL_AURA_MOD_TARGET_RESISTANCE aura
     if (attacker)
     {
@@ -3352,7 +3367,7 @@ bool Unit::isSpellBlocked(Unit* victim, SpellInfo const* spellProto, WeaponAttac
             return false;
 
         float blockChance = victim->GetUnitBlockChance();
-        blockChance += (int32(GetWeaponSkillValue(attackType)) - int32(victim->GetMaxSkillValueForLevel())) * 0.04f;
+        blockChance += (int32(GetWeaponSkillValue(attackType, victim)) - int32(victim->GetMaxSkillValueForLevel(this))) * 0.04f;
 
         // xinef: cant block while casting or while stunned
         if (blockChance < 0.0f || victim->IsNonMeleeSpellCast(false, false, true) || victim->HasUnitState(UNIT_STATE_CONTROLLED))
@@ -3412,7 +3427,7 @@ SpellMissInfo Unit::MeleeSpellHitResult(Unit* victim, SpellInfo const* spellInfo
     int32 attackerWeaponSkill;
     // skill value for these spells (for example judgements) is 5* level
     if (spellInfo->DmgClass == SPELL_DAMAGE_CLASS_RANGED && !spellInfo->IsRangedWeaponSpell())
-        attackerWeaponSkill = GetLevel() * 5;
+        attackerWeaponSkill = getLevelForTarget(victim) * 5;
     // bonus from skills is 0.04% per skill Diff
     else
         attackerWeaponSkill = int32(GetWeaponSkillValue(attType, victim));
@@ -4069,22 +4084,23 @@ int32 Unit::GetAscensionConditionalCombatModifier(Unit const* victim, SpellInfo 
             return false;
 
         int32 condition = effect->GetMiscValueB();
-        if (getClass() == CLASS_NECROMANCER && !creature)
+        if (getClass() == CLASS_NECROMANCER && !creature && condition == AURA_STATE_FROZEN)
         {
-            if (condition == AURA_STATE_FROZEN)
-            {
-                Spell const* cast = ToPlayer()->m_spellModTakingSpell;
-                Aura const* periodic = spellInfo ? victim->GetAura(spellInfo->Id, GetGUID()) : nullptr;
-                if (HasAura(801747) || (cast && cast->GetScriptValue(801747)) ||
-                    (periodic && periodic->GetScriptValue(801747)))
-                    return true;
-            }
-            if (condition == 31) // reviewed Fiend selector: a disease owned by this caster
-                for (auto const& [key, application] : victim->GetAppliedAuras())
-                    if (Aura const* aura = application->GetBase(); aura->GetCasterGUID() == GetGUID() &&
-                        aura->GetSpellInfo()->SpellFamilyName == 29 && aura->GetSpellInfo()->Dispel == DISPEL_DISEASE)
-                        return true;
+            Spell const* cast = ToPlayer()->m_spellModTakingSpell;
+            Aura const* periodic = spellInfo ? victim->GetAura(spellInfo->Id, GetGUID()) : nullptr;
+            if (HasAura(801747) || (cast && cast->GetScriptValue(801747)) ||
+                (periodic && periodic->GetScriptValue(801747)))
+                return true;
         }
+        // Reviewed disease selector: a disease of the caster's own family on the victim. The Necromancer's
+        // Fiend contract and the Bloodmage's Blood Plague both express "against Diseased targets" as 31.
+        if (!creature && condition == 31 &&
+            (getClass() == CLASS_NECROMANCER || getClass() == CLASS_SON_OF_ARUGAL))
+            for (auto const& [key, application] : victim->GetAppliedAuras())
+                if (Aura const* aura = application->GetBase(); aura->GetCasterGUID() == GetGUID() &&
+                    aura->GetSpellInfo()->SpellFamilyName == uint32(getClass()) + 6 &&
+                    aura->GetSpellInfo()->Dispel == DISPEL_DISEASE)
+                    return true;
         return creature ? condition > 0 && (victim->GetCreatureTypeMask() & uint32(condition)) :
             victim->HasAscensionConditionalCombatState(condition);
     });
@@ -8822,6 +8838,8 @@ float Unit::SpellPctDamageModsDone(Unit* victim, SpellInfo const* spellProto, Da
     uint32 creatureTypeMask = victim->GetCreatureTypeMask();
     DoneTotalMod *= GetTotalAuraMultiplier(SPELL_AURA_MOD_DAMAGE_DONE_VERSUS, [creatureTypeMask, spellProto, damagetype, this](AuraEffect const* aurEff)
     {
+        if (aurEff->GetMiscValueB() == ASCENSION_CLASSMASK_CREATURE_DAMAGE && !aurEff->IsAffectedOnSpell(spellProto))
+            return false;
         return creatureTypeMask & aurEff->GetMiscValue() && spellProto->ValidateAttribute6SpellDamageMods(this, aurEff, damagetype == DOT);
     });
 
@@ -10729,6 +10747,9 @@ uint32 Unit::MeleeDamageBonusDone(Unit* victim, uint32 pdamage, WeaponAttackType
 
     DoneTotalMod *= GetTotalAuraMultiplier(SPELL_AURA_MOD_DAMAGE_DONE_VERSUS, [creatureTypeMask, spellProto, this](AuraEffect const* aurEff)
     {
+        if (aurEff->GetMiscValueB() == ASCENSION_CLASSMASK_CREATURE_DAMAGE &&
+            (!spellProto || !aurEff->IsAffectedOnSpell(spellProto)))
+            return false;
         return (creatureTypeMask & aurEff->GetMiscValue() && (!spellProto || spellProto->ValidateAttribute6SpellDamageMods(this, aurEff, false)));
     });
 
