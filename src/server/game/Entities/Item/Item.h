@@ -276,7 +276,7 @@ public:
     [[nodiscard]] bool HasSocket() const;
     [[nodiscard]] uint8 GetGemCountWithID(uint32 GemID) const;
     [[nodiscard]] uint8 GetGemCountWithLimitCategory(uint32 limitCategory) const;
-    InventoryResult CanBeMergedPartlyWith(ItemTemplate const* proto) const;
+    InventoryResult CanBeMergedPartlyWith(ItemTemplate const* proto, Item const* incoming = nullptr) const;
 
     [[nodiscard]] uint8 GetSlot() const {return m_slot;}
     Bag* GetContainer() { return m_container; }
@@ -292,6 +292,12 @@ public:
     uint32 GetSpell();
 
     // RandomPropertyId (signed but stored as unsigned)
+    // True when the item carries no per-instance state and is therefore
+    // interchangeable with any other item of the same entry. Everything stacks
+    // here, equipment included, so this is what stops a stack merge silently
+    // eating an enchantment, a gem or a random-property roll.
+    [[nodiscard]] bool IsPristine() const;
+
     [[nodiscard]] int32 GetItemRandomPropertyId() const { return GetInt32Value(ITEM_FIELD_RANDOM_PROPERTIES_ID); }
     [[nodiscard]] uint32 GetItemSuffixFactor() const { return GetUInt32Value(ITEM_FIELD_PROPERTY_SEED); }
     void SetItemRandomProperties(int32 randomPropId);

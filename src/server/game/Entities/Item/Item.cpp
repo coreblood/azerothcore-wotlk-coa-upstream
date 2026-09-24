@@ -870,7 +870,34 @@ bool Item::IsBoundByTempEnchant() const
     return false;
 }
 
-InventoryResult Item::CanBeMergedPartlyWith(ItemTemplate const* proto) const
+bool Item::IsPristine() const
+{
+    // Sockets are enchantment slots 2-4, so this covers gems and enchants alike.
+    for (uint8 slot = 0; slot < MAX_ENCHANTMENT_SLOT; ++slot)
+        if (GetEnchantmentId(EnchantmentSlot(slot)))
+            return false;
+
+    if (GetItemRandomPropertyId() != 0)
+        return false;
+
+    if (IsSoulBound())
+        return false;
+
+    if (GetGuidValue(ITEM_FIELD_CREATOR) || GetGuidValue(ITEM_FIELD_GIFTCREATOR))
+        return false;
+
+    // Durability is being retired, but a worn item is still not the same item.
+    if (GetUInt32Value(ITEM_FIELD_MAXDURABILITY) > GetUInt32Value(ITEM_FIELD_DURABILITY))
+        return false;
+
+    for (uint8 i = 0; i < MAX_ITEM_PROTO_SPELLS; ++i)
+        if (GetSpellCharges(i) != GetTemplate()->Spells[i].SpellCharges)
+            return false;
+
+    return true;
+}
+
+InventoryResult Item::CanBeMergedPartlyWith(ItemTemplate const* proto, Item const* incoming) const
 {
     // not allow merge looting currently items
     if (m_lootGenerated)
@@ -882,6 +909,15 @@ InventoryResult Item::CanBeMergedPartlyWith(ItemTemplate const* proto) const
 
     // check free space (full stacks can't be target of merge
     if (GetCount() >= proto->GetMaxStackSize())
+        return EQUIP_ERR_ITEM_CANT_STACK;
+
+    // Everything is stackable on this server, equipment included, so two items
+    // of the same entry are no longer automatically interchangeable. Merging a
+    // modified item would destroy whatever was done to it.
+    if (!IsPristine())
+        return EQUIP_ERR_ITEM_CANT_STACK;
+
+    if (incoming && !incoming->IsPristine())
         return EQUIP_ERR_ITEM_CANT_STACK;
 
     return EQUIP_ERR_OK;
