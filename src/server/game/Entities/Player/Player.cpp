@@ -13084,7 +13084,7 @@ bool Player::HasItemFitToSpellRequirements(SpellInfo const* spellInfo, Item cons
     {
         case ITEM_CLASS_WEAPON:
             {
-                for (uint8 i = EQUIPMENT_SLOT_MAINHAND; i < EQUIPMENT_SLOT_TABARD; ++i)
+                for (uint8 i = EQUIPMENT_SLOT_MAINHAND; i <= EQUIPMENT_SLOT_RANGED; ++i)
                     if (Item* item = GetUseableItemByPos(INVENTORY_SLOT_BAG_0, i))
                         if (item != ignoreItem && item->IsFitToSpellRequirements(spellInfo))
                             return true;
@@ -13093,7 +13093,7 @@ bool Player::HasItemFitToSpellRequirements(SpellInfo const* spellInfo, Item cons
                 if (!spellInfo->IsPassive())
                 {
                     bool hasWeaponInSlot = false;
-                    for (uint8 i = EQUIPMENT_SLOT_MAINHAND; i < EQUIPMENT_SLOT_TABARD; ++i)
+                    for (uint8 i = EQUIPMENT_SLOT_MAINHAND; i <= EQUIPMENT_SLOT_RANGED; ++i)
                         if (Item* item = GetItemByPos(INVENTORY_SLOT_BAG_0, i))
                             if (item != ignoreItem && item->IsFitToSpellRequirements(spellInfo))
                             {
