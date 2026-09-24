@@ -1887,7 +1887,7 @@ void WorldSession::HandleEquipmentSetSave(WorldPacket& recvData)
     eqSet.IconName  = iconName;
     eqSet.state     = EQUIPMENT_SET_NEW;
 
-    for (uint32 i = 0; i < EQUIPMENT_SLOT_END; ++i)
+    for (uint32 i = 0; i < EQUIPMENT_SLOT_VISIBLE_END; ++i)
     {
         ObjectGuid itemGuid;
         recvData >> itemGuid.ReadAsPacked();
@@ -1937,7 +1937,7 @@ void WorldSession::HandleEquipmentSetUse(WorldPacket& recvData)
 
     std::vector<std::unique_ptr<SavedItem>> savedItems;
     uint8 errorId = 0;
-    for (uint32 i = 0; i < EQUIPMENT_SLOT_END; ++i)
+    for (uint32 i = 0; i < EQUIPMENT_SLOT_VISIBLE_END; ++i)
     {
         ObjectGuid itemGuid;
         recvData >> itemGuid.ReadAsPacked();

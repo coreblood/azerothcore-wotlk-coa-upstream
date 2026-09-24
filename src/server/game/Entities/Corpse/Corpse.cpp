@@ -101,7 +101,7 @@ void Corpse::SaveToDB()
     stmt->SetData (4, GetOrientation());                                       // orientation
     stmt->SetData(5, GetMapId());                                             // mapId
     stmt->SetData(6, GetUInt32Value(CORPSE_FIELD_DISPLAY_ID));                // displayId
-    stmt->SetData(7, _ConcatFields(CORPSE_FIELD_ITEM, EQUIPMENT_SLOT_END));   // itemCache
+    stmt->SetData(7, _ConcatFields(CORPSE_FIELD_ITEM, EQUIPMENT_SLOT_VISIBLE_END));   // itemCache
     stmt->SetData(8, GetUInt32Value(CORPSE_FIELD_BYTES_1));                   // bytes1
     stmt->SetData(9, GetUInt32Value(CORPSE_FIELD_BYTES_2));                   // bytes2
     stmt->SetData(10, GetUInt32Value(CORPSE_FIELD_GUILD));                    // guildId
@@ -145,7 +145,7 @@ bool Corpse::LoadCorpseFromDB(ObjectGuid::LowType guid, Field* fields)
     SetObjectScale(1.0f);
     SetUInt32Value(CORPSE_FIELD_DISPLAY_ID, fields[5].Get<uint32>());
 
-    if (!_LoadIntoDataField(fields[6].Get<std::string>(), CORPSE_FIELD_ITEM, EQUIPMENT_SLOT_END))
+    if (!_LoadIntoDataField(fields[6].Get<std::string>(), CORPSE_FIELD_ITEM, EQUIPMENT_SLOT_VISIBLE_END))
     {
         LOG_ERROR("entities.player", "Corpse ({}, owner: {}) is not created, given equipment info is not valid ('{}')",
             GetGUID().ToString(), GetOwnerGUID().ToString(), fields[6].Get<std::string>());

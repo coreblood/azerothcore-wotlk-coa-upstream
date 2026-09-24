@@ -3138,7 +3138,7 @@ Corpse* Map::ConvertCorpseToBones(ObjectGuid const& ownerGuid, bool insignia /*=
         bones->SetUInt32Value(CORPSE_FIELD_FLAGS, CORPSE_FLAG_UNK2 | CORPSE_FLAG_BONES);
         bones->SetGuidValue(CORPSE_FIELD_OWNER, corpse->GetOwnerGUID());
 
-        for (uint8 i = 0; i < EQUIPMENT_SLOT_END; ++i)
+        for (uint8 i = 0; i < EQUIPMENT_SLOT_VISIBLE_END; ++i)
             if (corpse->GetUInt32Value(CORPSE_FIELD_ITEM + i))
                 bones->SetUInt32Value(CORPSE_FIELD_ITEM + i, 0);
 

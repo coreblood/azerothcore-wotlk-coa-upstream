@@ -2975,6 +2975,12 @@ void Player::QuickEquipItem(uint16 pos, Item* pItem)
 
 void Player::SetVisibleItemSlot(uint8 slot, Item* pItem)
 {
+    // Only slots below EQUIPMENT_SLOT_VISIBLE_END have a PLAYER_VISIBLE_ITEM_*
+    // pair. Writing past them walks off the block into PLAYER_CHOSEN_TITLE and
+    // then into PLAYER_FIELD_INV_SLOT_HEAD, destroying equipped item GUIDs.
+    if (slot >= EQUIPMENT_SLOT_VISIBLE_END)
+        return;
+
     if (pItem)
     {
         SetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENTRYID + (slot * 2), pItem->GetEntry());
@@ -4955,7 +4961,7 @@ void Player::_LoadEquipmentSets(PreparedQueryResult result)
         eqSet.IgnoreMask = fields[4].Get<uint32>();
         eqSet.state     = EQUIPMENT_SET_UNCHANGED;
 
-        for (uint32 i = 0; i < EQUIPMENT_SLOT_END; ++i)
+        for (uint32 i = 0; i < EQUIPMENT_SLOT_VISIBLE_END; ++i)
             eqSet.Items[i] = ObjectGuid::Create<HighGuid::Item>(fields[5 + i].Get<uint32>());
 
         m_EquipmentSets[index] = eqSet;

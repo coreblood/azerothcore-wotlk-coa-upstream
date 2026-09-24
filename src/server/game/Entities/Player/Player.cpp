@@ -4823,7 +4823,9 @@ Corpse* Player::CreateCorpse()
     uint32 iDisplayID;
     uint32 iIventoryType;
     uint32 _cfi;
-    for (uint8 i = 0; i < EQUIPMENT_SLOT_END; i++)
+    // CORPSE_FIELD_ITEM holds EQUIPMENT_SLOT_VISIBLE_END entries; writing past
+    // them overruns into CORPSE_FIELD_BYTES_1 and the corpse renders wrong.
+    for (uint8 i = 0; i < EQUIPMENT_SLOT_VISIBLE_END; i++)
     {
         if (m_items[i])
         {
@@ -15212,7 +15214,9 @@ void Player::BuildEnchantmentsInfoData(WorldPacket* data)
     std::size_t slotUsedMaskPos = data->wpos();
     *data << uint32(slotUsedMask);                          // slotUsedMask < 0x80000
 
-    for (uint32 i = 0; i < EQUIPMENT_SLOT_END; ++i)
+    // 0x80000 is 1 << 19: the character-enum mask is 19 bits, so this stops at
+    // the slots the stock client knows rather than EQUIPMENT_SLOT_END.
+    for (uint32 i = 0; i < EQUIPMENT_SLOT_VISIBLE_END; ++i)
     {
         Item* item = GetItemByPos(INVENTORY_SLOT_BAG_0, i);
 
@@ -15264,7 +15268,10 @@ void Player::SendEquipmentSetList()
         data << uint32(itr->first);
         data << itr->second.Name;
         data << itr->second.IconName;
-        for (uint32 i = 0; i < EQUIPMENT_SLOT_END; ++i)
+        // The equipment manager is a stock-client feature: it reads exactly
+        // EQUIPMENT_SLOT_VISIBLE_END entries per set, and character_equipmentsets
+        // has that many item columns. The slots past it are not managed.
+        for (uint32 i = 0; i < EQUIPMENT_SLOT_VISIBLE_END; ++i)
         {
             // ignored slots stored in IgnoreMask, client wants "1" as raw GUID, so no HighGuid::Item
             if (itr->second.IgnoreMask & (1 << i))
@@ -15338,7 +15345,7 @@ void Player::_SaveEquipmentSets(CharacterDatabaseTransaction trans)
                 stmt->SetData(j++, eqset.Name.c_str());
                 stmt->SetData(j++, eqset.IconName.c_str());
                 stmt->SetData(j++, eqset.IgnoreMask);
-                for (uint8 i = 0; i < EQUIPMENT_SLOT_END; ++i)
+                for (uint8 i = 0; i < EQUIPMENT_SLOT_VISIBLE_END; ++i)
                     stmt->SetData(j++, eqset.Items[i].GetCounter());
                 stmt->SetData(j++, GetGUID().GetRawValue());
                 stmt->SetData(j++, eqset.Guid);
@@ -15355,7 +15362,7 @@ void Player::_SaveEquipmentSets(CharacterDatabaseTransaction trans)
                 stmt->SetData(j++, eqset.Name.c_str());
                 stmt->SetData(j++, eqset.IconName.c_str());
                 stmt->SetData(j++, eqset.IgnoreMask);
-                for (uint8 i = 0; i < EQUIPMENT_SLOT_END; ++i)
+                for (uint8 i = 0; i < EQUIPMENT_SLOT_VISIBLE_END; ++i)
                     stmt->SetData(j++, eqset.Items[i].GetCounter());
                 trans->Append(stmt);
                 eqset.state = EQUIPMENT_SET_UNCHANGED;
@@ -15556,7 +15563,7 @@ void Player::_SaveCharacter(bool create, CharacterDatabaseTransaction trans)
 
         ss.str("");
         // cache equipment...
-        for (uint32 i = 0; i < EQUIPMENT_SLOT_END * 2; ++i)
+        for (uint32 i = 0; i < EQUIPMENT_SLOT_VISIBLE_END * 2; ++i)
             ss << GetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENTRYID + i) << ' ';
 
         // ...and bags for enum opcode
@@ -15708,7 +15715,7 @@ void Player::_SaveCharacter(bool create, CharacterDatabaseTransaction trans)
 
         ss.str("");
         // cache equipment...
-        for (uint32 i = 0; i < EQUIPMENT_SLOT_END * 2; ++i)
+        for (uint32 i = 0; i < EQUIPMENT_SLOT_VISIBLE_END * 2; ++i)
             ss << GetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENTRYID + i) << ' ';
 
         // ...and bags for enum opcode
