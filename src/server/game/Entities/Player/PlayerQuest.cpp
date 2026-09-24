@@ -408,13 +408,17 @@ bool Player::CanRewardQuest(Quest const* quest, bool msg)
     if (GetQuestRewardStatus(quest->GetQuestId()))
         return false;
 
-    // prevent receive reward with quest items in bank
+    // Stock rule was that quest items had to be carried, not banked. There is no
+    // carrying here: the keyring holds quest items and the vault takes the
+    // overflow, so the vault has to count or a delivery quest silently jams once
+    // the keyring fills. DestroyItemCount walks the bank as well, so whatever is
+    // counted here is also consumed on turn-in.
     if (quest->HasSpecialFlag(QUEST_SPECIAL_FLAGS_DELIVER))
     {
         for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; i++)
         {
             if (quest->RequiredItemCount[i] != 0 &&
-                GetItemCount(quest->RequiredItemId[i]) < quest->RequiredItemCount[i])
+                GetItemCount(quest->RequiredItemId[i], true) < quest->RequiredItemCount[i])
             {
                 if (msg)
                     SendEquipError(EQUIP_ERR_ITEM_NOT_FOUND, nullptr, nullptr, quest->RequiredItemId[i]);
@@ -1988,8 +1992,11 @@ void Player::ItemRemovedQuestCheck(uint32 entry, uint32 count)
                 uint32 reqitemcount = qInfo->RequiredItemCount[j];
                 uint16 curitemcount = q_status.ItemCount[j];
 
+                // Counts the vault too, matching the turn-in check. Without it a
+                // completed objective drops back to partial when the keyring copy
+                // is removed while the overflow still sits in the vault.
                 if (q_status.ItemCount[j] >= reqitemcount) // we may have more than what the status shows
-                    curitemcount = GetItemCount(entry, false);
+                    curitemcount = GetItemCount(entry, true);
 
                 uint16 newItemCount = (count > curitemcount) ? 0 : curitemcount - count;
                 newItemCount = std::min<uint16>(newItemCount, reqitemcount);
