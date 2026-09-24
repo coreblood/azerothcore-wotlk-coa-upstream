@@ -22,6 +22,7 @@
 #include "TC9Sidecar.h"
 #include "WorldSession.h"
 #include "AccountMgr.h"
+#include "AccountVault.h"
 #include "BattlegroundMgr.h"
 #include "BanMgr.h"
 #include "CharacterPackets.h"
@@ -168,6 +169,19 @@ WorldSession::WorldSession(uint32 id, std::string&& name, uint32 accountFlags, s
 }
 
 /// WorldSession destructor
+AccountVault* WorldSession::GetVault()
+{
+    // Lazy so the member needs no declaration-order dance with _accountId,
+    // and a session that never touches storage never pays the query.
+    if (!_vault)
+    {
+        _vault = std::make_unique<AccountVault>(_accountId);
+        _vault->Load();
+    }
+
+    return _vault.get();
+}
+
 WorldSession::~WorldSession()
 {
     LoginDatabase.Execute("UPDATE account SET totaltime = {} WHERE id = {}", GetTotalTime(), GetAccountId());

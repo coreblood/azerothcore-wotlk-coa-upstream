@@ -16,6 +16,7 @@
  */
 
 #include "AccountMgr.h"
+#include "AccountVault.h"
 #include "AchievementMgr.h"
 #include "ArenaTeam.h"
 #include "ArenaTeamMgr.h"
@@ -67,6 +68,7 @@
 #include "Util.h"
 #include "World.h"
 #include "WorldPacket.h"
+#include "WorldSession.h"
 
 /// @todo: this import is not necessary for compilation and marked as unused by the IDE
 //  however, for some reasons removing it would cause a damn linking issue
@@ -373,6 +375,14 @@ uint32 Player::GetItemCount(uint32 item, bool inBankAlso, Item* skipItem) const
                 if (Item* pItem = GetItemByPos(INVENTORY_SLOT_BAG_0, i))
                     if (pItem != skipItem && pItem->HasSocket())
                         count += pItem->GetGemCountWithID(item);
+
+        // The vault is a table, not slots, so none of the loops above can reach
+        // it. inBankAlso means "count what I am not carrying", and with no bags
+        // and no backpack that is the vault. One hash lookup, because this is a
+        // hot path: quest completion, crafting and spell reagents all land here.
+        if (WorldSession* session = GetSession())
+            if (AccountVault* vault = session->GetVault())
+                count += vault->GetItemCount(item);
     }
 
     return count;

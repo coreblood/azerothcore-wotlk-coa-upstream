@@ -40,6 +40,7 @@
 #include <memory>
 #include <utility>
 
+class AccountVault;
 class Creature;
 class GameObject;
 class InstanceSave;
@@ -503,6 +504,9 @@ public:
     /// For unit testing - initializes RBAC data without database access
     void InitRBACDataForTest();
     uint32 GetAccountId() const { return _accountId; }
+    // The only storage on this server; loaded on first use and shared by every
+    // character on the account.
+    AccountVault* GetVault();
     Player* GetPlayer() const { return _player; }
     std::string const& GetPlayerName() const;
     std::string GetPlayerInfo() const;
@@ -1321,6 +1325,7 @@ private:
     AccountTypes _security;
     bool _skipQueue;
     uint32 _accountId;
+    std::unique_ptr<AccountVault> _vault;
     rbac::RBACData* _RBACData;
     std::string _accountName;
     uint32 _accountFlags;
