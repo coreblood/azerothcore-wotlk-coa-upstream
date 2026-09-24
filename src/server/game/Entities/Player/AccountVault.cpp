@@ -44,6 +44,7 @@ void AccountVault::Load()
         entry.itemGuid = fields[1].Get<uint32>();
         entry.itemEntry = fields[2].Get<uint32>();
         entry.count = fields[3].Get<uint32>();
+        entry.live = nullptr;
 
         if (slot >= CAPACITY)
         {
@@ -57,14 +58,14 @@ void AccountVault::Load()
     } while (result->NextRow());
 }
 
-bool AccountVault::Deposit(Item* item, Player* depositor)
+Item* AccountVault::Deposit(Item* item, Player* depositor)
 {
     if (!item || !depositor)
-        return false;
+        return nullptr;
 
     uint16 slot = FindFreeSlot();
     if (slot == INVALID_SLOT)
-        return false;
+        return nullptr;
 
     ObjectGuid::LowType itemGuid = item->GetGUID().GetCounter();
 
@@ -84,23 +85,28 @@ bool AccountVault::Deposit(Item* item, Player* depositor)
         _accountId, slot, itemGuid, depositor->GetGUID().GetCounter());
     CharacterDatabase.CommitTransaction(trans);
 
+    // Leave the player's update queue without ITEM_REMOVED, which would delete
+    // the row the vault now points at. Doing it while ownership still matches
+    // keeps RemoveFromUpdateQueueOf quiet. The object itself stays alive: the
+    // caller is still holding this pointer and will use it.
+    item->RemoveFromUpdateQueueOf(depositor);
+
     VaultEntry entry;
     entry.itemGuid = itemGuid;
     entry.itemEntry = item->GetEntry();
     entry.count = item->GetCount();
+    entry.live = item;
 
     _slots[slot] = entry;
     IndexAdd(entry.itemEntry, entry.count);
+    return item;
+}
 
-    // Drop the object without ITEM_REMOVED, which would delete the row we just
-    // pointed the vault at. Leaving the update queue while ownership still
-    // matches keeps RemoveFromUpdateQueueOf quiet.
-    item->RemoveFromUpdateQueueOf(depositor);
-    if (item->IsInWorld())
-        item->RemoveFromWorld();
-
-    delete item;
-    return true;
+AccountVault::~AccountVault()
+{
+    // Rows outlive the session; the materialised objects do not.
+    for (auto const& pair : _slots)
+        delete pair.second.live;
 }
 
 Item* AccountVault::Withdraw(uint16 slot, Player* receiver)
@@ -113,6 +119,16 @@ Item* AccountVault::Withdraw(uint16 slot, Player* receiver)
         return nullptr;
 
     VaultEntry const entry = itr->second;
+
+    // Deposited this session, so the object is still here; no need to rebuild it.
+    if (entry.live)
+    {
+        CharacterDatabase.Execute("DELETE FROM account_vault WHERE account_id = {} AND slot = {}", _accountId, slot);
+        entry.live->SetOwnerGUID(receiver->GetGUID());
+        IndexRemove(entry.itemEntry, entry.count);
+        _slots.erase(itr);
+        return entry.live;
+    }
 
     ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry.itemEntry);
     if (!proto)

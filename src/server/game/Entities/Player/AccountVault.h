@@ -29,6 +29,13 @@ struct VaultEntry
     ObjectGuid::LowType itemGuid;
     uint32 itemEntry;
     uint32 count;
+
+    // Live object for items deposited this session, otherwise nullptr and the
+    // row is the only representation. The acquisition API hands its caller the
+    // Item it just stored - LootHandler passes it straight to SendNewItem - so
+    // a deposit cannot destroy the object the way a row-only vault would want
+    // to. Bounded by what a session actually acquires, not by CAPACITY.
+    Item* live;
 };
 
 /*
@@ -54,13 +61,19 @@ public:
     static constexpr uint16 INVALID_SLOT = 0xFFFF;
 
     explicit AccountVault(uint32 accountId) : _accountId(accountId) { }
+    ~AccountVault();
+
+    AccountVault(AccountVault const&) = delete;
+    AccountVault& operator=(AccountVault const&) = delete;
 
     void Load();
 
-    // Persists the item into the vault and disposes of the in-memory object.
-    // The caller must already have taken it out of the player's slots with
+    // Persists the item and takes ownership of the object, returning it so the
+    // caller still has the live pointer the acquisition API promises. The caller
+    // must already have taken it out of the player's slots with
     // Player::RemoveItem, which leaves the row intact, never DestroyItem.
-    bool Deposit(Item* item, Player* depositor);
+    // Returns nullptr and stores nothing if the vault is full.
+    Item* Deposit(Item* item, Player* depositor);
 
     // Rebuilds the row into an Item owned by the receiver and frees the slot.
     // Returns nullptr if the slot is empty or the row cannot be read.
