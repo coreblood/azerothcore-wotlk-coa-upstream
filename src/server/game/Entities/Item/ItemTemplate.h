@@ -736,6 +736,17 @@ struct ItemTemplate
 
     [[nodiscard]] bool IsCurrencyToken() const { return BagFamily & BAG_FAMILY_MASK_CURRENCY_TOKENS; }
 
+    [[nodiscard]] bool IsQuestItem() const { return Class == ITEM_CLASS_QUEST; }
+
+    // Keys and quest items share the keyring range. There are no bags, so quest
+    // items need a container the player never manages, and the keyring already
+    // is one: it is private, persisted, and counted by GetItemCount, which is
+    // what quest completion reads. The dungeons that needed keys are gone.
+    [[nodiscard]] bool GoesInKeyring() const
+    {
+        return (BagFamily & BAG_FAMILY_MASK_KEYS) || IsQuestItem();
+    }
+
     [[nodiscard]] uint32 GetMaxStackSize() const
     {
         return (Stackable == 2147483647 || Stackable <= 0) ? uint32(0x7FFFFFFF - 1) : uint32(Stackable);
