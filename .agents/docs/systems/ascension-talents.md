@@ -1,7 +1,7 @@
 # CoA talents: catalog, commands and the client's character-advancement service
 
 Use this reference for anything touching CoA talent points, ranks, specializations or the talent window's
-state. The live pieces are `modules/mod-ascension-compat/src/AscensionCoATalentData.*` (catalog),
+state. The live pieces are `src/server/coa/AscensionCoATalentData.*` (catalog),
 `AscensionCoATalentState.*` (spellbook-derived state and wire form) and `AscensionClassService` in
 `AscensionCompat.cpp` (rules, commands, packets).
 
@@ -105,9 +105,12 @@ Opcodes and layouts come from the community measurements in `hertigservices/Asce
   by that client and therefore never split. Sent with the bridge; `.localspecstate` is that client's request
   for it (same handler as `.localtalent sync`). One of the two forms retires with the client patch that ships.
 - Opcode identities (from #4030, decoded from the `Extensions.dll` name-stub table): `0x0523` is
-  `CMSG_CUSTOM_ASCENSION_POINT_SPEND_REQUEST` (the native point purchase, never sent by the patch-B shim),
-  `0x061A` is `CMSG_CREATURE_QUERY_BULK`, `0x064A` is `SMSG_PATCH_CHARACTER_ADVANCEMENT` (unused: the client
-  loads its own catalogue).
+  `CMSG_CUSTOM_ASCENSION_POINT_SPEND_REQUEST`, `0x061A` is `CMSG_CREATURE_QUERY_BULK`, `0x064A` is
+  `SMSG_PATCH_CHARACTER_ADVANCEMENT` (unused: the client loads its own catalogue). Despite its name, `0x0523`
+  carries no talent points: its five senders are the vanity-collection Lua functions (`C_VanityCollection`
+  and `RequestDeliver*CollectionItem`), each writing `{u8 Enum.VanityCurrency, u32 item}`. Currency 2
+  (Donation Points) comes from both Deliver and the web-shop buy; the server handles it as a delivery through
+  `DeliverLocalVanityItem`.
 
 ## The shipped compat client (patch-B.MPQ, `Ascension_Collections`)
 
@@ -121,7 +124,7 @@ WoW restores it, so the specialization overlay returns on every reload or relog;
 
 ## Checks
 
-- `python3 modules/mod-ascension-compat/tests/talent_state/run.py --dbc-dir <client dbc dir>`: budgets, rank
+- `python3 apps/coa-tests/talent_state/run.py --dbc-dir <client dbc dir>`: budgets, rank
   derivation, point accounting, packet layout and upload parsing, compiled against the real catalog.
 - Ghost `e2e/coa/talents/authority_test.go`: persistence across a relog, budget refusal, reset, the 0x0725/0x0726
   sequence and the 0x0727 upload against a running slot.

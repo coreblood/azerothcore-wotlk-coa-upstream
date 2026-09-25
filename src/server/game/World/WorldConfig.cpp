@@ -17,6 +17,7 @@
 
 #include "Player.h"
 #include "WorldConfig.h"
+#include <cmath>
 
 void WorldConfig::BuildConfigCache()
 {
@@ -52,16 +53,69 @@ void WorldConfig::BuildConfigCache()
 
     SetConfigValue<float>(RATE_REWARD_QUEST_MONEY, "Rate.RewardQuestMoney", 1.0f);
     SetConfigValue<float>(RATE_REWARD_BONUS_MONEY, "Rate.RewardBonusMoney", 1.0f);
-    SetConfigValue<float>(RATE_XP_KILL, "Rate.XP.Kill", 1.0f);
+    auto const validXPRate = [](float const& value) { return std::isfinite(value) && value >= 0.0f; };
+    SetConfigValue<float>(RATE_XP_GLOBAL, "Rate.XP.Global", 0.9295f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION, "Rate.XP.Profession", 0.4f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_BASE_FRACTION, "Rate.XP.Profession.BaseFraction", 0.02f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_GRAY, "Rate.XP.Profession.Gray", 0.0f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_GREEN, "Rate.XP.Profession.Green", 0.95f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_YELLOW, "Rate.XP.Profession.Yellow", 1.0f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_ORANGE, "Rate.XP.Profession.Orange", 1.05f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_MINING, "Rate.XP.Profession.Mining", 2.11f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_HERBALISM, "Rate.XP.Profession.Herbalism", 1.44f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_DISENCHANTING, "Rate.XP.Profession.Disenchanting", 1.44f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_SKINNING, "Rate.XP.Profession.Skinning", 0.55f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_FISHING, "Rate.XP.Profession.Fishing", 0.33f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_BLACKSMITHING, "Rate.XP.Profession.Blacksmithing", 3.77f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_JEWELCRAFTING, "Rate.XP.Profession.Jewelcrafting", 3.77f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_ALCHEMY, "Rate.XP.Profession.Alchemy", 3.0f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_ENCHANTING, "Rate.XP.Profession.Enchanting", 2.88f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_LEATHERWORKING, "Rate.XP.Profession.Leatherworking", 2.0f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_FIRST_AID, "Rate.XP.Profession.FirstAid", 0.55f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_COOKING, "Rate.XP.Profession.Cooking", 0.55f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_ENGINEERING, "Rate.XP.Profession.Engineering", 3.6f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_TAILORING, "Rate.XP.Profession.Tailoring", 1.66f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_LOCKPICKING, "Rate.XP.Profession.Lockpicking", 0.0f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_PROFESSION_INSCRIPTION, "Rate.XP.Profession.Inscription", 2.88f,
+        ConfigValueCache::Reloadable::Yes, validXPRate, "finite and >= 0");
+    SetConfigValue<float>(RATE_XP_KILL, "Rate.XP.Kill", 1.0909091f);
+    SetConfigValue<float>(RATE_XP_KILL_TBC, "Rate.XP.Kill.TBC", 1.0909091f);
+    SetConfigValue<float>(RATE_XP_KILL_WOTLK, "Rate.XP.Kill.WotLK", 0.90909094f);
+    SetConfigValue<float>(RATE_XP_ELITE, "Rate.XP.Elite", 1.44f);
+    SetConfigValue<float>(RATE_XP_DUNGEON_ELITE, "Rate.XP.DungeonElite", 2.175f);
     SetConfigValue<float>(RATE_XP_BG_KILL_AV, "Rate.XP.BattlegroundKillAV", 1.0f);
     SetConfigValue<float>(RATE_XP_BG_KILL_WSG, "Rate.XP.BattlegroundKillWSG", 1.0f);
     SetConfigValue<float>(RATE_XP_BG_KILL_AB, "Rate.XP.BattlegroundKillAB", 1.0f);
     SetConfigValue<float>(RATE_XP_BG_KILL_EOTS, "Rate.XP.BattlegroundKillEOTS", 1.0f);
     SetConfigValue<float>(RATE_XP_BG_KILL_SOTA, "Rate.XP.BattlegroundKillSOTA", 1.0f);
     SetConfigValue<float>(RATE_XP_BG_KILL_IC, "Rate.XP.BattlegroundKillIC", 1.0f);
-    SetConfigValue<float>(RATE_XP_QUEST, "Rate.XP.Quest", 1.0f);
+    SetConfigValue<float>(RATE_XP_QUEST, "Rate.XP.Quest", 1.26f);
+    SetConfigValue<float>(RATE_XP_QUEST_TBC, "Rate.XP.Quest.TBC", 1.26f);
+    SetConfigValue<float>(RATE_XP_QUEST_WOTLK, "Rate.XP.Quest.WotLK", 1.05f);
     SetConfigValue<float>(RATE_XP_QUEST_DF, "Rate.XP.Quest.DF", 1.0f);
-    SetConfigValue<float>(RATE_XP_EXPLORE, "Rate.XP.Explore", 1.0f);
+    SetConfigValue<float>(RATE_XP_EXPLORE, "Rate.XP.Explore", 4.0f);
     SetConfigValue<float>(RATE_XP_PET, "Rate.XP.Pet", 1.0f);
     SetConfigValue<float>(RATE_XP_PET_NEXT_LEVEL, "Rate.Pet.LevelXP", 0.05f);
     SetConfigValue<float>(RATE_XP_BATTLEGROUND_BONUS, "Rate.XP.BattlegroundBonus", 1.0f);
@@ -108,7 +162,7 @@ void WorldConfig::BuildConfigCache()
     SetConfigValue<float>(RATE_CREATURE_ELITE_WORLDBOSS_SPELLDAMAGE, "Rate.Creature.Elite.WORLDBOSS.SpellDamage", 1.0f);
     SetConfigValue<float>(RATE_CREATURE_ELITE_RARE_SPELLDAMAGE, "Rate.Creature.Elite.RARE.SpellDamage", 1.0f);
     SetConfigValue<float>(RATE_CREATURE_AGGRO, "Rate.Creature.Aggro", 1.0f);
-    SetConfigValue<float>(RATE_REST_INGAME, "Rate.Rest.InGame", 1.0f);
+    SetConfigValue<float>(RATE_REST_INGAME, "Rate.Rest.InGame", 0.5f);
     SetConfigValue<float>(RATE_REST_OFFLINE_IN_TAVERN_OR_CITY, "Rate.Rest.Offline.InTavernOrCity", 1.0f);
     SetConfigValue<float>(RATE_REST_OFFLINE_IN_WILDERNESS, "Rate.Rest.Offline.InWilderness", 1.0f);
     SetConfigValue<float>(RATE_REST_MAX_BONUS, "Rate.Rest.MaxBonus", 1.5f);
@@ -135,6 +189,7 @@ void WorldConfig::BuildConfigCache()
     SetConfigValue<float>(RATE_MOVESPEED_NPC, "Rate.MoveSpeed.NPC", 1.0f, ConfigValueCache::Reloadable::Yes, [](float const& value) { return value >= 0.0f; }, ">= 0");
 
     SetConfigValue<float>(RATE_CORPSE_DECAY_LOOTED, "Rate.Corpse.Decay.Looted", 0.5f);
+    SetConfigValue<bool>(CONFIG_RESPAWN_TIMER_STARTS_AT_DEATH, "Respawn.TimerStartsAtDeath", true);
 
     SetConfigValue<float>(RATE_DURABILITY_LOSS_ON_DEATH, "DurabilityLoss.OnDeath", 10.0f, ConfigValueCache::Reloadable::Yes, [](float const& value) { return value >= 0.0f && value <= 100.0f; }, ">= 0 && <= 100");
 
@@ -210,7 +265,7 @@ void WorldConfig::BuildConfigCache()
     SetConfigValue<bool>(CONFIG_ALLOW_TWO_SIDE_INTERACTION_ARENA, "AllowTwoSide.Interaction.Arena", false);
     SetConfigValue<bool>(CONFIG_ALLOW_TWO_SIDE_INTERACTION_AUCTION, "AllowTwoSide.Interaction.Auction", false);
 
-    SetConfigValue<uint32>(CONFIG_MIN_PLAYER_NAME, "MinPlayerName", 2, ConfigValueCache::Reloadable::Yes, [](uint32 const& value) { return value > 0 && value <= MAX_PLAYER_NAME; }, "> 0 && <= MAX_PLAYER_NAME");
+    SetConfigValue<uint32>(CONFIG_MIN_PLAYER_NAME, "MinPlayerName", 2, ConfigValueCache::Reloadable::Yes, [](uint32 const& value) { return value > 0 && value <= MAX_PLAYER_NAME_PART; }, "> 0 && <= MAX_PLAYER_NAME_PART");
     SetConfigValue<uint32>(CONFIG_MIN_CHARTER_NAME, "MinCharterName", 2, ConfigValueCache::Reloadable::Yes, [](uint32 const& value) { return value > 0 && value <= MAX_CHARTER_NAME; }, "> 0 && <= MAX_CHARTER_NAME");
     SetConfigValue<uint32>(CONFIG_MIN_PET_NAME, "MinPetName", 2, ConfigValueCache::Reloadable::Yes, [](uint32 const& value) { return value > 0 && value <= MAX_PET_NAME; }, "> 0 && <= MAX_PET_NAME");
 
@@ -295,7 +350,10 @@ void WorldConfig::BuildConfigCache()
 
     SetConfigValue<bool>(CONFIG_OBJECT_SPARKLES, "Visibility.ObjectSparkles", true);
 
-    SetConfigValue<bool>(CONFIG_LOW_LEVEL_REGEN_BOOST, "EnableLowLevelRegenBoost", true);
+    SetConfigValue<bool>(CONFIG_LOW_LEVEL_REGEN_BOOST, "EnableLowLevelRegenBoost", false);
+    SetConfigValue<bool>(CONFIG_CLASSIC_PLUS_COMBAT_RULES, "ClassicPlus.CombatRules", true);
+    SetConfigValue<bool>(CONFIG_CLASSIC_PLUS_STAT_FORMULAS, "ClassicPlus.StatFormulas", true);
+    SetConfigValue<bool>(CONFIG_CLASSIC_PLUS_REPUTATION_SPILLOVER, "ClassicPlus.ReputationSpillover", true);
 
     SetConfigValue<bool>(CONFIG_OBJECT_QUEST_MARKERS, "Visibility.ObjectQuestMarkers", true);
 
@@ -364,7 +422,7 @@ void WorldConfig::BuildConfigCache()
 
     SetConfigValue<uint32>(CONFIG_EVENT_ANNOUNCE, "Event.Announce", 0);
 
-    SetConfigValue<float>(CONFIG_CREATURE_LEASH_RADIUS, "CreatureLeashRadius", 30.0f);
+    SetConfigValue<float>(CONFIG_CREATURE_LEASH_RADIUS, "CreatureLeashRadius", 50.0f);
     SetConfigValue<float>(CONFIG_CREATURE_FAMILY_FLEE_ASSISTANCE_RADIUS, "CreatureFamilyFleeAssistanceRadius", 30.0f);
     SetConfigValue<float>(CONFIG_CREATURE_FAMILY_ASSISTANCE_RADIUS, "CreatureFamilyAssistanceRadius", 10.0f);
     SetConfigValue<uint32>(CONFIG_CREATURE_FAMILY_ASSISTANCE_DELAY, "CreatureFamilyAssistanceDelay", 2000);

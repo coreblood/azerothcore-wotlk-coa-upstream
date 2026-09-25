@@ -25,10 +25,11 @@ add_executable(
 
 target_link_libraries(
         unit_tests
+        acore-core-interface
         game
         gtest_main
         gmock_main
-        game-interface
+        coa-interface
 )
 
 # Add module test sources if any modules registered tests

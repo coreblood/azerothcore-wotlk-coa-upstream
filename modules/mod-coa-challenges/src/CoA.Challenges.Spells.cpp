@@ -198,16 +198,13 @@ namespace CoAChallenges
     // Death strips auras; resurrect must restore active challenge auras.
     void ReapplyActiveSpells(Player* player)
     {
-        uint32 guid = player->GetGUID().GetCounter();
-        if (QueryResult actives = CharacterDatabase.Query(
-                "SELECT challengeId, level FROM coa_character_challenge WHERE guid = {}", guid))
-        {
-            do
-            {
-                Field* f = actives->Fetch();
-                ApplyChallengeSpell(player, f[0].Get<uint32>(), f[1].Get<uint32>());
-            } while (actives->NextRow());
-        }
+        ReapplyActiveSpells(player, LoadActiveChallengeRows(player->GetGUID().GetCounter()));
+    }
+
+    void ReapplyActiveSpells(Player* player, std::vector<ActiveChallengeRow> const& rows)
+    {
+        for (ActiveChallengeRow const& row : rows)
+            ApplyChallengeSpell(player, row.challengeId, row.level);
     }
 
     // Login reconciliation: drop challenge auras that have no backing active
@@ -304,8 +301,10 @@ namespace CoAChallenges
         // Stacks are capped by the client's aura model (255), not by the literal
         // 100: with HungerMax > 100 the meter must keep tracking the real value.
         player->SetAuraStack(spell, player, (uint32)std::min(value, 255));
+        // Per-change meter updates are very chatty (one per hunger/thirst tick
+        // per player); keep them at DEBUG so they don't flood Server.log.
         if (Aura* aura = player->GetAura(spell))
-            LOG_INFO("module.coa_challenges", "Meter aura {} on {}: stacks={}",
+            LOG_DEBUG("module.coa_challenges", "Meter aura {} on {}: stacks={}",
                 spell, player->GetName(), (uint32)aura->GetStackAmount());
         else
             LOG_WARN("module.coa_challenges", "Meter aura {} failed to apply on {}",

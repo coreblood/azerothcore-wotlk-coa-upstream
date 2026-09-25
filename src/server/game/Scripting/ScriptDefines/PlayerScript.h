@@ -232,6 +232,8 @@ enum PlayerHook
     PLAYERHOOK_ON_CAN_REGENERATE,
     PLAYERHOOK_ON_CAN_ENERGIZE,
     PLAYERHOOK_ON_GET_MAX_ALLOWED_LEVEL,
+    PLAYERHOOK_ON_BANKER_ACTIVATE,
+    PLAYERHOOK_ON_BANK_WITHDRAW,
     PLAYERHOOK_END
 };
 
@@ -488,6 +490,12 @@ public:
 
     // Before durability repair action, you can even modify the discount value
     virtual void OnPlayerBeforeDurabilityRepair(Player* /*player*/, ObjectGuid /*npcGUID*/, ObjectGuid /*itemGUID*/, float&/*discountMod*/, uint8 /*guildBank*/) { }
+
+    // Before a banker click is resolved. Returning false withholds the native bank window, for a
+    // banker the script answers itself. The click is answered before the core's own interaction
+    // checks - which is why the script is given the clicked GUID rather than a resolved creature,
+    // and why it does its own reach check before it speaks.
+    [[nodiscard]] virtual bool OnPlayerBankerActivate(Player* /*player*/, ObjectGuid /*banker*/) { return true; }
 
     //Before buying something from any vendor
     virtual void OnPlayerBeforeBuyItemFromVendor(Player* /*player*/, ObjectGuid /*vendorguid*/, uint32 /*vendorslot*/, uint32& /*item*/, uint8 /*count*/, uint8 /*bag*/, uint8 /*slot*/) { };
@@ -847,6 +855,10 @@ public:
      * @return true if player is allowed to enter the Manastorm
      */
     virtual bool OnPlayerCanEnterManastorm(Player* /*player*/) { return true; }
+
+    // Called when a player withdraws from a bank the Ascension personal/realm bank items
+    // open (an item moved out, or money taken out). `kind`: 0 = personal, 1 = realm.
+    virtual void OnPlayerBankWithdraw(Player* /*player*/, uint8 /*kind*/) { }
 
     /**
      * @brief This hook is called when a player is about to take environmental damage.

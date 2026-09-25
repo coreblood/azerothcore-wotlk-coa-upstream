@@ -53,6 +53,7 @@
 #include "World.h"
 #include "WorldPacket.h"
 #include <cmath>
+#include <optional>
 #include <G3D/g3dmath.h>
 
 /// @todo: this import is not necessary for compilation and marked as unused by the IDE
@@ -2642,6 +2643,7 @@ void Spell::DoAllEffectOnTarget(TargetInfo* target)
     SpellMissInfo scriptMissInfo = missInfo;
     uint32 scriptDamageResult = 0;
     m_scriptHealthLeechDamage = 0;
+    m_scriptHealingIncludingOverheal = 0;
 
     // Need init unitTarget by default unit (can changed in code on reflect)
     // Or on missInfo != SPELL_MISS_NONE unitTarget undefined (but need in trigger subsystem)
@@ -2814,6 +2816,7 @@ void Spell::DoAllEffectOnTarget(TargetInfo* target)
         }
 
         int32 gain = caster->HealBySpell(healInfo, crit);
+        m_scriptHealingIncludingOverheal = healInfo.GetHeal();
         float threat = float(gain) * 0.5f;
         if (caster->IsClass(CLASS_PALADIN))
             threat *= 0.5f;
@@ -2912,8 +2915,10 @@ void Spell::DoAllEffectOnTarget(TargetInfo* target)
             // damage result for other scripts, and do not infer damage from
             // later health deltas that can include triggered heals or damage.
             uint32 const healthBeforeDamage = unitTarget->GetHealth();
-            caster->DealSpellDamage(&damageInfo, true, this, &scriptDamageResult);
-            m_scriptHealthLeechDamage = std::min(scriptDamageResult, healthBeforeDamage);
+            std::optional<uint32> damageForHealthLeech;
+            caster->DealSpellDamage(&damageInfo, true, this, &scriptDamageResult, &damageForHealthLeech);
+            m_scriptHealthLeechDamage = damageForHealthLeech.value_or(
+                std::min(scriptDamageResult, healthBeforeDamage));
 
             // do procs after damage, eg healing effects
             // no need to check if target is alive, done in procdamageandspell
@@ -3699,8 +3704,8 @@ SpellCastResult Spell::prepare(SpellCastTargets const* targets, AuraEffect const
                 exceptSpellId = m_spellInfo->Id;
             }
 
-            m_caster->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_CAST, exceptSpellId, m_spellInfo->Id == 75);
-            m_caster->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_SPELL_ATTACK, exceptSpellId, m_spellInfo->Id == 75);
+            m_caster->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_CAST, exceptSpellId, m_spellInfo->Id == 75, m_spellInfo);
+            m_caster->RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_SPELL_ATTACK, exceptSpellId, m_spellInfo->Id == 75, m_spellInfo);
         }
 
         m_caster->SetCurrentCastedSpell(this);

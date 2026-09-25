@@ -1011,7 +1011,9 @@ enum PlayerXPSource
     XPSOURCE_QUEST = 1,
     XPSOURCE_QUEST_DF = 2,
     XPSOURCE_EXPLORE = 3,
-    XPSOURCE_BATTLEGROUND = 4
+    XPSOURCE_BATTLEGROUND = 4,
+    XPSOURCE_PROFESSION = 5,
+    XPSOURCE_PROFESSION_SKILL = 6
 };
 
 enum InstantFlightGossipAction
@@ -1506,7 +1508,7 @@ public:
     void RemoveRewardedQuest(uint32 questId, bool update = true);
     void SendQuestUpdate(uint32 questId);
     QuestGiverStatus GetQuestDialogStatus(Object* questGiver);
-    float GetQuestRate(bool isDFQuest = false);
+    float GetQuestRate(bool isDFQuest = false, int32 questLevel = 0);
     void SetDailyQuestStatus(uint32 quest_id);
     bool IsDailyQuestDone(uint32 quest_id);
     void SetWeeklyQuestStatus(uint32 quest_id);
@@ -1981,6 +1983,8 @@ public:
     bool UpdateSkill(uint32 skill_id, uint32 step);
     bool UpdateSkillPro(uint16 SkillId, int32 Chance, uint32 step);
 
+    void RewardProfessionXP(uint32 skillId, uint32 current, uint32 gray, uint32 green, uint32 yellow,
+        bool disenchanting = false);
     bool UpdateCraftSkill(uint32 spellid);
     bool UpdateGatherSkill(uint32 SkillId, uint32 SkillValue, uint32 RedLevel, uint32 Multiplicator = 1);
     bool UpdateFishingSkill();

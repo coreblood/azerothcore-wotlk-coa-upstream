@@ -174,9 +174,9 @@ namespace CoAChallenges
     // rested area (inn); at max the player falls asleep (dies). Driven entirely
     // server-side (not an aura meter). Only challenges whose Rules list carries
     // CHALLENGE_RULES_TYPE_FATIGUED_UNLESS_RESTED are tracked.
-    struct FatigueState { uint32 challengeId = 0; int32 fatigue = 0; uint32 ms = 0; bool resting = true; };
+    struct FatigueState { uint32 challengeId = 0; int32 fatigue = 0; uint32 ms = 0; bool resting = true; uint32 graceMs = 0; };
 
-    struct ConditionState { std::string label; bool broken = false; std::string detail; };
+    struct ConditionState { std::string label; bool broken = false; std::string detail; std::string message; };
 
     // Group challenge sync (SMSG 0x59B / CMSG 0x59C). The client's 0x59B
     // handler stores the {challengeID, level} pairs as "pending" and fires
@@ -333,6 +333,19 @@ uint32 LoadGameModeMask(uint32 guid);
 bool CacheGenerationGuardEnabled();
 std::vector<std::pair<uint32, uint32>> CachedCharChallenges(uint32 guid);
 void ClearCharChallengeCache(uint32 guid);
+struct ActiveChallengeRow
+{
+    uint32 challengeId = 0;
+    uint32 level = 0;
+    int32 hunger = 0;
+    int32 thirst = 0;
+};
+std::vector<ActiveChallengeRow> LoadActiveChallengeRows(uint32 guid);
+uint64 CharChallengeCacheGeneration();
+void SeedCharChallengeCache(uint32 guid, uint64 generation, std::vector<ActiveChallengeRow> const& rows);
+void PreloadLoginChallengeRows(uint32 guid);
+std::vector<ActiveChallengeRow> TakeLoginChallengeRows(uint32 guid);
+void ForgetLoginChallengeRows(uint32 guid);
 uint32 CachedGameModeMask(uint32 guid);
 void ClearGameModeMaskCache(uint32 guid);
 void ApplyGameModeSpells(Player* player, uint32 oldMask, uint32 newMask);
@@ -350,6 +363,7 @@ void ReapplyGameModeBehavior(Player* player);
 char const* ChallengeResponseString(uint32 code);
     std::vector<uint32> GetChallengeSpells(uint32 challengeID, uint32 level = 0);
     void ReapplyActiveSpells(Player* player);
+    void ReapplyActiveSpells(Player* player, std::vector<ActiveChallengeRow> const& rows);
     void StripOrphanChallengeAuras(Player* player);
     std::vector<RewardDef> GetChallengeRewards(uint32 challengeID, uint32 level);
     void GrantChallengeRewards(Player* player, uint32 challengeID, uint32 level, bool firstTime);
@@ -365,6 +379,7 @@ void UntrackHunger(Player* player);
 void WarnHunger(Player* player, char const* kind, int32 value);
 void HungerUpdate(Player* player, uint32 diff);
 void RefreshHungerTracking(Player* player);
+void RefreshHungerTracking(Player* player, std::vector<ActiveChallengeRow> const& rows);
 void RemoveHungerChallenge(Player* player, uint32 challengeID);
 void SyncMeterAuras(Player* player);
 bool IsFatigueChallenge(uint32 challengeID);
@@ -376,6 +391,7 @@ void SendFatigueBar(Player* player, int32 fatigue);
 void TrackFatigue(Player* player, uint32 challengeID);
 void ClearFatigue(Player* player);
 void RefreshFatigueTracking(Player* player);
+void RefreshFatigueTracking(Player* player, std::vector<ActiveChallengeRow> const& rows);
 void TrackSpellbind(Player* player, uint32 challengeID);
 void UntrackSpellbind(Player* player);
 void RefreshSpellbindTracking(Player* player);
@@ -386,7 +402,7 @@ void RefreshInvertedBreathTracking(Player* player);
     void UntrackRegen(Player* player);
     void FatigueUpdate(Player* player, uint32 diff);
     // HIGH_RISK_ONLY: aura that marks a character as participating in the
-    // High Risk ruleset (applied by mod-ascension-compat). Conf-tunable.
+    // High Risk ruleset (applied by CoA). Conf-tunable.
     uint32 HighRiskAura();
     bool HighRiskActivationBlocked(Player* player);
     void RefreshHighRiskTracking(Player* player);
@@ -402,6 +418,7 @@ void RefreshInvertedBreathTracking(Player* player);
     // NO_GROUP_FOR_DUNGEONS: true when either player is inside a dungeon.
     bool GroupForDungeonsBlocked(Player* player, Player* other);
 void SendActiveList(Player* player);
+void SendActiveList(Player* player, std::vector<ActiveChallengeRow> const& rows);
 void PushLoginState(Player* player);
 void AppendFailureString(WorldPacket& data, std::string const& s);
 void AppendFailureRecord(WorldPacket& data, std::string const& who, uint32 challengeID, uint32 level);
@@ -457,6 +474,7 @@ void SendChallengeSyncToGroup(Player* actor, uint32 timeoutMs, bool remove,
 bool ChallengeRequiresParty(uint32 challengeID);
 bool HasFailure(uint32 guid, uint32 challengeID);
 bool HasAnyFailure(uint32 guid);
+bool ActivationPermanentlyBlocked(uint32 guid);
 bool HasCompletion(uint32 guid, uint32 challengeID);
 bool HasCompletionLevel(uint32 guid, uint32 challengeID, uint32 level);
 void SendDeathUpdate(Player* player, uint32 challengeID, uint32 level, uint32 deaths);
@@ -469,6 +487,7 @@ constexpr uint32 COA_PRESTIGE_AURA = 9930831;
 bool IsPrestiged(Player* player);
 uint32 RequiredGameMode(uint32 challengeID);
 void RecomputeRequiredGameModes(Player* player);
+void RecomputeRequiredGameModes(Player* player, std::vector<ActiveChallengeRow> const& rows);
 uint32 RequiredGameEvent(uint32 challengeID);
 bool NoRewards(uint32 challengeID);
 bool ChallengeExists(uint32 challengeID);
@@ -483,12 +502,19 @@ bool RuleListContains(std::string const& list, std::string const& rule);
 bool PlayerHasRule(Player* player, char const* rule);
 void LoadChallengesEnabled();
 bool ChallengesEnabled();
+bool OutsideInteractionGateEnabled();
 uint32 ActiveChallengeWithRule(Player* player, char const* rule, uint32& level);
 std::set<uint32> ActiveChallenges(uint32 guid);
+bool HasActiveTrial(uint32 guid);
 void SetConditionFlag(uint32 guid, char const* flag);
 bool HasConditionFlag(uint32 guid, char const* flag);
+void ClearConditionFlag(uint32 guid, std::string const& flag);
+void ResetConditionFlags(uint32 guid);
+void ForgetConditionFlags(uint32 guid);
 uint32 FreeInventorySlots(Player* player);
 std::vector<ConditionState> EvaluateConditions(Player* player, uint32 challengeID);
+std::vector<ConditionState> EvaluateConditionsFor(Player* player, uint32 challengeID,
+    std::string const& conds, bool injectOutside);
 std::string CheckActivationConditions(Player* player, uint32 challengeID);
 bool IsPristine(Player* player, uint32 challengeID);
 bool RequirementsMet(uint32 guid, uint32 challengeID);
@@ -505,7 +531,7 @@ void FailChallenge(Player* player, uint32 challengeID, uint32 level, uint32 deat
     ObjectGuid const& killerSource = ObjectGuid::Empty,
     KillerKind causeKind = KillerKind::Unknown, uint32 causeEntry = 0, std::string causeName = "");
 void FailSharedFate(Player* dead, uint32 challengeID);
-void FailSharedFateHolders(Group* group, Player* extra);
+void FailSharedFateHolders(Group* group, ObjectGuid extraGuid);
 void HandlePlayerDeath(Player* player);
 uint32 CraftedItemRarity(SkillLineAbilityEntry const* ability);
 void GrantProfessionXP(Player* member, uint32 rarityMult);
