@@ -353,6 +353,10 @@ struct Actor
     uint32 trainerWindowRows = 0;
     std::map<uint32, uint8> trainerWindowState;
     std::map<uint32, uint32> trainerWindowAbility;
+    uint32 vendorWindows = 0;
+    uint32 vendorItems = 0;
+    std::map<uint32, uint32> vendorPrice;
+    uint32 vendorPriceSum = 0;
     uint32 whoResponses = 0;
     uint32 lootReceived = 0;
     std::array<uint32, 2> meleeAttacksByHand{};
@@ -373,6 +377,7 @@ struct Actor
     uint32 challengeStartResponses = 0;
     uint32 challengeStartLastCode = 0;
     std::map<uint64, std::map<uint16, uint32>> unitValues;
+    std::map<uint32, uint32> creatureQueryRank;
     uint32 lastQuestWindow = 0;
     std::string observerError;
     std::unique_ptr<WorldSession> session;
@@ -623,6 +628,21 @@ void ObservePacket(Actor& actor, WorldPacket const& packet)
     }
     if (packet.GetOpcode() == SMSG_SHOW_BANK)
         ++actor.bankShows;
+    if (packet.GetOpcode() == SMSG_CREATURE_QUERY_RESPONSE)
+    {
+        WorldPacket response(packet);
+        uint32 entry = 0;
+        response >> entry;
+        if (!(entry & 0x80000000))
+        {
+            std::string name, subName, iconName;
+            uint8 unusedName = 0;
+            uint32 typeFlags = 0, type = 0, family = 0, rank = 0;
+            response >> name >> unusedName >> unusedName >> unusedName >> subName >> iconName;
+            response >> typeFlags >> type >> family >> rank;
+            actor.creatureQueryRank[entry] = rank;
+        }
+    }
     ObserveUnitValues(actor, packet);
     if (packet.GetOpcode() == SMSG_ATTACKERSTATEUPDATE)
     {
@@ -747,6 +767,36 @@ void ObservePacket(Actor& actor, WorldPacket const& packet)
             {
                 actor.trainerWindowState[uint32(rowSpell)] = state;
                 actor.trainerWindowAbility[uint32(rowSpell)] = ability1;
+            }
+        }
+    }
+
+    if (packet.GetOpcode() == SMSG_LIST_INVENTORY)
+    {
+        WorldPacket shelves(packet);
+        ObjectGuid vendor;
+        uint8 rows = 0;
+        shelves >> vendor >> rows;
+        ++actor.vendorWindows;
+        actor.vendorItems = rows;
+        actor.vendorPrice.clear();
+        actor.vendorPriceSum = 0;
+        for (uint8 i = 0; i < rows; ++i)
+        {
+            uint32 slot = 0;
+            uint32 shelfItem = 0;
+            uint32 displayId = 0;
+            int32 leftInStock = 0;
+            uint32 price = 0;
+            uint32 durability = 0;
+            uint32 buyCount = 0;
+            uint32 extendedCost = 0;
+            shelves >> slot >> shelfItem >> displayId >> leftInStock >> price
+                    >> durability >> buyCount >> extendedCost;
+            if (shelfItem != 0)
+            {
+                actor.vendorPrice[shelfItem] = price;
+                actor.vendorPriceSum += price;
             }
         }
     }
@@ -1326,7 +1376,9 @@ private:
                 creature->SetRegeneratingHealth(false);
                 creature->SetFaction(definition.get<uint32>("faction", 14));
                 creature->SetLevel(uint8(definition.get<uint32>("level", 80)));
-                creature->SetMaxHealth(definition.get<uint32>("health", 100000));
+                uint32 const health = definition.get<uint32>("health", 100000);
+                creature->SetStatFlatModifier(UNIT_MOD_HEALTH, BASE_VALUE, float(health));
+                creature->SetMaxHealth(health);
                 creature->SetHealth(creature->GetMaxHealth());
                 creature->CombatStop(true, true);
                 if (CreatureAI* ai = creature->AI(); ai && ai->IsEngaged())
@@ -1377,6 +1429,8 @@ private:
         }
         if (metric == "alive")
             return unit->IsAlive();
+        if (metric == "map_id")
+            return unit->GetMapId();
         if (metric == "combat")
             return unit->IsInCombat();
         if (metric == "casting")
@@ -1429,6 +1483,12 @@ private:
             if (itr == actor.unitValues.end() || !itr->second.count(field))
                 return 0;
             return itr->second.at(field);
+        }
+        if (metric == "creature_query_rank")
+        {
+            Actor& actor = _actors.at(step.get<std::string>("actor"));
+            auto itr = actor.creatureQueryRank.find(step.get<uint32>("entry"));
+            return itr == actor.creatureQueryRank.end() ? -1 : int64(itr->second);
         }
         if (metric == "quest_level" || metric == "quest_xp")
         {
@@ -1660,6 +1720,18 @@ private:
             auto const& window = _actors.at(step.get<std::string>("actor")).trainerWindowAbility;
             auto const found = window.find(spell);
             return found == window.end() ? -1.0 : double(found->second);
+        }
+        if (metric == "vendor_list_packets")
+            return double(_actors.at(step.get<std::string>("actor")).vendorWindows);
+        if (metric == "vendor_items")
+            return double(_actors.at(step.get<std::string>("actor")).vendorItems);
+        if (metric == "vendor_price_sum")
+            return double(_actors.at(step.get<std::string>("actor")).vendorPriceSum);
+        if (metric == "vendor_price")
+        {
+            auto const& prices = _actors.at(step.get<std::string>("actor")).vendorPrice;
+            auto const found = prices.find(step.get<uint32>("item", 0));
+            return found == prices.end() ? -1.0 : double(found->second);
         }
         if (metric == "quest_rewarded")
         {
@@ -2664,6 +2736,43 @@ private:
             if (group->IsFull() && !group->isRaidGroup())
                 group->ConvertToRaid();
             Require(group->AddMember(member), "Could not join fixture group");
+            if (auto method = step.get_optional<uint32>("loot_method"))
+            {
+                group->SetLootMethod(LootMethod(*method));
+                group->SendUpdate();
+            }
+        }
+        else if (action == "lfg_dungeon")
+        {
+            Group* group = player->GetGroup();
+            Require(group != nullptr && !group->isLFGGroup(), "LFG dungeon fixture needs an ordinary group");
+            lfg::LFGDungeonData const* dungeon = sLFGMgr->GetLFGDungeon(step.get<uint32>("dungeon"));
+            Require(dungeon != nullptr, "Unknown LFG dungeon");
+            group->ConvertToLFG();
+            group->SetDungeonDifficulty(Difficulty(dungeon->difficulty));
+            sLFGMgr->SetDungeon(group->GetGUID(), dungeon->Entry());
+        }
+        else if (action == "lfg_teleport")
+        {
+            bool out = step.get<bool>("out", false);
+            WorldPacket packet(CMSG_LFG_TELEPORT, 1);
+            packet << out;
+            player->GetSession()->HandleLfgTeleportOpcode(packet);
+            record.put("result", "teleport requested");
+        }
+        else if (action == "leave_group")
+        {
+            Require(player->GetGroup() != nullptr, "Leave request needs a group");
+            WorldPacket packet(CMSG_GROUP_DISBAND, 0);
+            player->GetSession()->HandleGroupDisbandOpcode(packet);
+            Require(!player->GetGroup(), "Native leave request kept the player grouped");
+        }
+        else if (action == "die")
+        {
+            Require(player->IsAlive(), "Death fixture needs a living player");
+            Unit::DealDamage(player, player, player->GetHealth(), nullptr, SELF_DAMAGE, SPELL_SCHOOL_MASK_NORMAL,
+                nullptr, false);
+            Require(!player->IsAlive(), "Self damage did not kill the player");
         }
         else if (action == "command")
         {
@@ -2849,6 +2958,13 @@ private:
         {
             WorldPacket packet(CMSG_COA_START_CHALLENGE, 8);
             packet << uint32(step.get<uint32>("challenge")) << uint32(step.get<uint32>("level"));
+            sScriptMgr->CanPacketReceive(player->GetSession(), packet);
+            record.put("result", "submitted; verify the answer with assertions");
+        }
+        else if (action == "stop_challenge")
+        {
+            WorldPacket packet(CMSG_COA_STOP_CHALLENGE, 4);
+            packet << uint32(step.get<uint32>("challenge"));
             sScriptMgr->CanPacketReceive(player->GetSession(), packet);
             record.put("result", "submitted; verify the answer with assertions");
         }

@@ -28,6 +28,9 @@ void AddSC_AscensionPvpPower();
 void AddSC_AscensionRestingBuff();
 void AddSC_AscensionClosestResurrection();
 void AddSC_AscensionThreatRedirect();
+void AddSC_AscensionKeepersScrollSteadfast();
+void AddSC_AscensionProfessionSpellAffect();
+void AddSC_AscensionKeepersScrollZoneBuff();
 void AddAscensionStockCoefficientScripts();
 void AddAscensionScalingBaseScripts();
 void AddCoABugReportScripts();
@@ -260,6 +263,7 @@ void AddSC_AscensionRunemasterHurricane();
 void AddSC_AscensionRunemasterRiftClones();
 void AddSC_AscensionWelcomeWarchest();
 void AddSC_AscensionClassBundleStore();
+void AddSC_AscensionLfgObjective();
 
 void AddCoAScripts()
 {
@@ -517,6 +521,10 @@ void AddCoAScripts()
     AddSC_AscensionRestingBuff();
     AddSC_AscensionClosestResurrection();
     AddSC_AscensionThreatRedirect();
+    AddSC_AscensionKeepersScrollSteadfast();
+    AddSC_AscensionProfessionSpellAffect();
+    AddSC_AscensionKeepersScrollZoneBuff();
     AddSC_AscensionWelcomeWarchest();
     AddSC_AscensionClassBundleStore();
+    AddSC_AscensionLfgObjective();
 }

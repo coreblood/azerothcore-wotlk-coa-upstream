@@ -362,7 +362,9 @@ preserves Static and must leave the talent without a depletion bonus.
 The [damage-led scaling scenario](scenarios/level-scaling-damage-engagement.json) checks that an
 out-of-range attacker scales a fresh creature before a nonlethal or lethal opening hit, and that
 later damage leaves its combat level fixed. It requires `CoA.LevelScaling=1`,
-`CoA.LevelScalingMaxLift=5` and `MonsterSight=50`. The level-1 fixtures stand 80–85 yards
+`CoA.LevelScalingMaxLift=5`, `MonsterSight=50` and `DestinyWeaver.LevelScaling=0` (or
+`DestinyWeaver.Enable=0`): while the Destiny Weaver owns creature scaling per viewer, the realm-wide lift
+stands aside, so this case and `destiny-weaver-scaling` need separate runs. The level-1 fixtures stand 80–85 yards
 away and must scale to level 6, so both declare `level_scaling`. One fixture has only one maximum HP to
 expose damage-before-scaling.
 Spell 705798 is learned as a fixture: its one damage and zero initial threat exercise damage-led
@@ -418,7 +420,11 @@ damage coefficients.
 | `stop_attack` | Player `actor`: native melee stop request. |
 | `pvp` | Player `actor`, boolean `enabled`: native PvP toggle request. Disabling retains the ordinary flag-removal timer. |
 | `set_moving` | Player `actor`, boolean `enabled`: fixture the native forward movement flag for cast restriction tests. |
-| `group` | `actor`, `target`: fixture party; creates the actor's group if needed and adds an ungrouped player. |
+| `group` | `actor`, `target`, optional `loot_method` (0-4): fixture party; creates the actor's group if needed, adds an ungrouped player and sets the loot method. |
+| `lfg_dungeon` | `actor`, LFGDungeons.dbc `dungeon`: fixture Dungeon Finder group; converts the actor's ordinary group to an LFG group assigned to that dungeon, as a completed proposal does. |
+| `lfg_teleport` | Player `actor`, optional boolean `out` (default false): native `CMSG_LFG_TELEPORT` request into or out of the group's dungeon. |
+| `leave_group` | Player `actor`: native `CMSG_GROUP_DISBAND` leave request; fails if the player stays grouped. |
+| `die` | Player `actor`: fixture death through self damage equal to current health; the body stays unreleased. |
 | `cast_charm` | Same fields: native pet-cast handler, with the charmed unit as the default target. |
 | `gossip_hello` | `actor`, optional `target`: native gossip handler; defaults to the actor's summoned companion. |
 | `banker_activate` | `actor`, optional `target`, or optional `owner` + `entry`: native banker click (`CMSG_BANKER_ACTIVATE`); defaults to the actor's summoned companion, and `owner` aims it at a companion another actor summoned, walking up to it first. |
@@ -461,8 +467,8 @@ a previously named snapshot of the same metric; it is available on snapshots and
 `ratio_to` then divides by a nonzero snapshot, including a different numeric metric such as healing/damage.
 `cast` accepts an optional `destination` with `x`, `y`, `z` to send an explicit ground target.
 
-Metrics: `health`, `max_health`, `creature_type`, `power`, `max_power`, `alive`, `combat`, `casting`, `level`,
-`quest_objective_count` (needs `quest`, optional `index`), `knows_spell`, `has_talent`, `talent_points`,
+Metrics: `health`, `max_health`, `creature_type`, `power`, `max_power`, `alive`, `map_id`, `combat`, `casting`,
+`level`, `quest_objective_count` (needs `quest`, optional `index`), `knows_spell`, `has_talent`, `talent_points`,
 `cooldown_ms`, `item_count`, `carried_item_count`, `bank_bag_slots`, `aura`, `aura_stacks`, `aura_charges`,
 `aura_duration_ms`, `aura_amount`, `pet_entry`, `pet_aura_stacks`, `owned_creature_count`,
 `charm_entry`, `charm_aura_stacks`, `controls_self`, `private_instance`, `dynamic_object`,
@@ -491,6 +497,10 @@ count of the last one, and `trainer_window_state` requires `spell` and returns t
 the spell's row (`0` available, `1` unavailable, `2` known), or `-1` when the window does not hold that row.
 They read what a client draws and gates **Train** on, so a window that stopped selling a spell is distinct
 from one that still offers it.
+`vendor_list_packets` counts the vendor lists the session has been sent, `vendor_items` is the row
+count of the last one, `vendor_price` requires `item` and returns the price that list offered it at
+(`-1` when the shelves do not hold that item), and `vendor_price_sum` is what the whole list costs -
+a fingerprint of a vendor's stock, so one vendor can be held to another's items and prices.
 `who_count` counts players in the actor's last native Who response; `who_class` requires a player `target`
 and returns that player's class ID, or zero if absent. These inspect packets from socketless test sessions,
 not client packet delivery. Masks use native Who bits (`1 << classID`, `1 << raceID`), with class 32 in bit zero;
@@ -668,6 +678,8 @@ It tests dispatch and deferral, not a real socket, packet delivery, or every pos
 the socketless session. They return zero until the corresponding field has been observed; they do not
 force updates or inspect client rendering. `lfg_dungeon_disabled` takes an LFGDungeons.dbc `dungeon` id and
 returns 1 when the `disables` table locks that dungeon's map and difficulty out of Dungeon Finder, otherwise 0.
+`creature_query_rank` takes a player `actor` and creature `entry` and returns the rank of the
+last creature query response delivered to that session, or -1 before one arrives.
 `quest_level` and `quest_xp` take a player `actor` and `quest`
 and query the native quest level and XP calculations without awarding a reward.
 
