@@ -1,7 +1,7 @@
 name: Sync upstream
+# Automatic sync from jealous-sound is switched off (2026-09-28): main no longer pulls
+# that repo on a schedule. Run it by hand from the Actions tab if a sync is ever wanted.
 on:
-  schedule:
-    - cron: '0 6 * * *'
   workflow_dispatch:
 permissions:
   contents: write
