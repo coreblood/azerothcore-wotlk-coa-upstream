@@ -6376,7 +6376,7 @@ SpellCastResult Spell::CheckCast(bool strict, uint32* /*param1*/, uint32* /*para
                     uint32 skill = creature->GetCreatureTemplate()->GetRequiredLootSkill();
 
                     int32 skillValue = m_caster->ToPlayer()->GetSkillValue(skill);
-                    int32 TargetLevel = m_targets.GetUnitTarget()->GetLevel();
+                    int32 TargetLevel = creature->GetLootSkillLevelFor(m_caster->ToPlayer());
                     int32 ReqValue = (skillValue < 100 ? (TargetLevel - 10) * 10 : TargetLevel * 5);
                     if (ReqValue > skillValue)
                         return SPELL_FAILED_LOW_CASTLEVEL;
@@ -7921,8 +7921,8 @@ SpellCastResult Spell::CheckItems(uint32* param1, uint32* param2)
 
 SpellCastResult Spell::CheckSpellFocus()
 {
-    // check spell focus object
-    if (m_spellInfo->RequiresSpellFocus)
+    // check spell focus object, unless a script answers the focus itself
+    if (m_spellInfo->RequiresSpellFocus && !sScriptMgr->OnSpellFocusAnswered(this))
     {
         CellCoord p(Acore::ComputeCellCoord(m_caster->GetPositionX(), m_caster->GetPositionY()));
         Cell cell(p);
