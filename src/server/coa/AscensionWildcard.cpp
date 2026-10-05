@@ -2,6 +2,7 @@
 
 #include "AscensionWildcard.h"
 #include "AscensionCacheRewards.h"
+#include "AscensionHeroClass.h"
 #include "AscensionFreepick.h"
 #include "AscensionCoAConfig.h"
 #include "AscensionCompatOpcodes.h"
@@ -2047,6 +2048,18 @@ void SyncRunes(Player* player)
     sent.Sent = true;
 }
 
+static_assert(AscensionHeroClass::WARRIOR == CLASS_WARRIOR && AscensionHeroClass::PALADIN == CLASS_PALADIN &&
+    AscensionHeroClass::HUNTER == CLASS_HUNTER && AscensionHeroClass::ROGUE == CLASS_ROGUE &&
+    AscensionHeroClass::PRIEST == CLASS_PRIEST && AscensionHeroClass::DEATH_KNIGHT == CLASS_DEATH_KNIGHT &&
+    AscensionHeroClass::SHAMAN == CLASS_SHAMAN && AscensionHeroClass::MAGE == CLASS_MAGE &&
+    AscensionHeroClass::WARLOCK == CLASS_WARLOCK && AscensionHeroClass::DRUID == CLASS_DRUID);
+static_assert(AscensionHeroClass::CONTEXT_ABILITY == CLASS_CONTEXT_ABILITY &&
+    AscensionHeroClass::CONTEXT_ABILITY_REACTIVE == CLASS_CONTEXT_ABILITY_REACTIVE &&
+    AscensionHeroClass::CONTEXT_PET == CLASS_CONTEXT_PET &&
+    AscensionHeroClass::CONTEXT_PET_CHARM == CLASS_CONTEXT_PET_CHARM &&
+    AscensionHeroClass::CONTEXT_EQUIP_RELIC == CLASS_CONTEXT_EQUIP_RELIC &&
+    AscensionHeroClass::CONTEXT_EQUIP_SHIELDS == CLASS_CONTEXT_EQUIP_SHIELDS);
+
 class AscensionWildcardPlayer final : public PlayerScript
 {
 public:
@@ -2061,20 +2074,20 @@ public:
 
     Optional<bool> OnPlayerIsClass(Player const* player, Classes playerClass, ClassContext context) override
     {
-        bool const runes = playerClass == CLASS_DEATH_KNIGHT && context == CLASS_CONTEXT_ABILITY;
-        bool const tamedPets = playerClass == CLASS_HUNTER && context == CLASS_CONTEXT_PET;
-        if ((runes || tamedPets) && IsRealmHero(player))
-            return true;
+        if (!IsRealmHero(player))
+            return std::nullopt;
+        if (std::optional<bool> const answer = AscensionHeroClass::Answer(uint8(playerClass), uint8(context),
+            [player](uint32 spellId) { return player->HasSpell(spellId); }))
+            return *answer;
         return std::nullopt;
     }
 
-    void OnPlayerBeforeGuardianInitStatsForLevel(Player* player, Guardian* guardian, CreatureTemplate const* cinfo,
+    void OnPlayerBeforeGuardianInitStatsForLevel(Player* player, Guardian* guardian, CreatureTemplate const*,
         PetType& petType) override
     {
         if (!guardian->IsPet() || !IsRealmHero(player))
             return;
-        CreatureFamilyEntry const* family = sCreatureFamilyStore.LookupEntry(cinfo->family);
-        petType = family && family->petTalentType >= 0 ? HUNTER_PET : SUMMON_PET;
+        petType = guardian->ToPet()->getPetType();
     }
 
     void OnPlayerCreatureKill(Player* killer, Creature* killed) override
@@ -3149,6 +3162,11 @@ bool IsWildcardHero(Player const* player)
         return false;
     std::optional<uint32> const mask = sScriptMgr->OnPlayerGetGameModeMask(player);
     return mask && (*mask & GAME_MODE_WILDCARD);
+}
+
+bool IsClasslessHero(Player const* player)
+{
+    return IsRealmHero(player);
 }
 
 std::uint32_t ActiveSpec(Player const* player)
