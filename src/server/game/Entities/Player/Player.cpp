@@ -11539,6 +11539,10 @@ void Player::AddSpellAndCategoryCooldowns(SpellInfo const* spellInfo, uint32 ite
         cat = spellInfo->GetCategory();
         rec = spellInfo->RecoveryTime;
         catrec = spellInfo->CategoryRecoveryTime;
+
+        // A charged spell recovers through its charges, not through its DBC category cooldown
+        if (spellInfo->MaxCharges)
+            catrec = 0;
     }
 
     time_t catrecTime;
@@ -14276,10 +14280,11 @@ static RuneType runeSlotTypes[MAX_RUNES] =
 
 void Player::InitRunes()
 {
-    if (!IsClass(CLASS_DEATH_KNIGHT, CLASS_CONTEXT_ABILITY))
+    if (!IsClass(CLASS_DEATH_KNIGHT, CLASS_CONTEXT_ABILITY) && getClass() != CLASS_HERO)
         return;
 
-    m_runes = new Runes;
+    if (!m_runes)
+        m_runes = new Runes;
 
     m_runes->runeState = 0;
     m_runes->lastUsedRune = RUNE_BLOOD;
