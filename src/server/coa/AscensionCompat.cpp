@@ -180,8 +180,11 @@ constexpr uint16 SMSG_PATCH_ITEM = 0x0932;
 constexpr uint16 SMSG_PATCH_ITEM_DISPLAY_INFO = 0x096B;
 constexpr uint16 SMSG_PATCH_SPELL = 0x092A;
 constexpr uint16 SMSG_PATCH_SUPER_TRACK = 0x06BE;
+constexpr uint16 SMSG_PATCH_SPELL_SHAPESHIFT_FORM = 0x0949;
+constexpr uint16 SMSG_PATCH_CREATURE_MODEL_DATA = 0x0974;
 constexpr uint32 CUSTOM_DISPLAY_ID_FALLBACK_MIN = 652000;
 constexpr uint32 DISPLAY_PATCH_FALLBACK_DELAY_MS = 5000;
+constexpr uint32 DISPLAY_PATCH_RESEND_COOLDOWN_MS = 10000;
 
 constexpr uint16 SMSG_PATCH_VANITY_COLLECTION = 0x0573;
 constexpr uint16 SMSG_UPDATE_OBJECT_ADDON = 0x0578;
@@ -1507,7 +1510,7 @@ public:
   {
     if (AscensionWildcard::IsWildcardHero(player))
       return AscensionWildcard::KnownEntries(player);
-    if (AscensionFreepick::IsFreepickHero(player))
+    if (AscensionFreepick::HasFreepickBuild(player))
       return AscensionFreepick::KnownEntries(player);
     std::vector<AscensionCoATalentState::KnownEntry> known;
     for (auto const& entry : AscensionCompatData::CoATalentEntries)
@@ -1540,7 +1543,8 @@ public:
     WorldPacket packet(SMSG_CHARACTER_ADVANCEMENT_ACTIVE_SPEC, sizeof(uint32) * 2);
     bool const wildcard = AscensionWildcard::IsWildcardHero(player);
     packet << (wildcard ? AscensionWildcard::ActiveSpec(player) : ActiveSlot(player))
-           << uint32(wildcard || IsAscensionCustomClass(player) ? AscensionWildcard::SPECIALIZATION_COUNT : 1);
+           << uint32(wildcard || IsAscensionCustomClass(player) || AscensionFreepick::IsFreepickHero(player) ?
+        AscensionWildcard::SPECIALIZATION_COUNT : 1);
     player->GetSession()->SendPacket(&packet);
 
     uint32 const sent = SendKnownTalentEntries(player);
@@ -2070,7 +2074,7 @@ public:
     }
 
     if (!IsAscensionCustomClass(player) && !AscensionWildcard::IsWildcardHero(player) &&
-        !AscensionFreepick::IsFreepickHero(player))
+        !AscensionFreepick::HasFreepickBuild(player))
       return;
     for (TalentRequest const& request : requests)
     {
@@ -2102,7 +2106,7 @@ public:
       refusal.Result = choice.Result;
       refusal.Learn = choice.Learn;
     }
-    else if (AscensionFreepick::IsFreepickHero(player))
+    else if (AscensionFreepick::HasFreepickBuild(player))
     {
       AscensionFreepick::UploadResult const applied = AscensionFreepick::ApplyUpload(player, upload);
       refusal.Result = applied.Result;
@@ -3589,10 +3593,10 @@ public:
 
     PreparedPatchRows const &rows = GetPreparedPatchRows();
     LOG_INFO("coa",
-             "Prepared {} CreatureDisplayInfo, {} ItemDisplayInfo, {} Item, "
-             "{} Spell and {} SuperTrack patch rows for the client stream",
-             rows.CreatureDisplayIds.size(), rows.ItemDisplayInfos.size(),
-             rows.Items.size(), rows.Spells.size(), rows.SuperTracks.size());
+             "Prepared {} CreatureModelData, {} CreatureDisplayInfo, {} ItemDisplayInfo, {} Item, "
+             "{} Spell, {} SuperTrack and {} SpellShapeshiftForm patch rows for the client stream",
+             rows.CreatureModels.size(), rows.CreatureDisplayIds.size(), rows.ItemDisplayInfos.size(),
+             rows.Items.size(), rows.Spells.size(), rows.SuperTracks.size(), rows.ShapeshiftForms.size());
   }
 
   void OnPlayerLogin(Player *player) {
@@ -3604,7 +3608,8 @@ public:
     _streamedPlayers.erase(guid);
     _sentItemRows.erase(guid);
     _onDemandItemRows.erase(guid);
-    _fallbackTimers[guid] = DISPLAY_PATCH_FALLBACK_DELAY_MS;
+    _lastStreamMs.erase(guid);
+    _fallbackTimers[guid] = { DISPLAY_PATCH_FALLBACK_DELAY_MS, false };
   }
 
   void OnPlayerLogout(Player *player) {
@@ -3615,6 +3620,7 @@ public:
       _streamedPlayers.erase(guid);
       _sentItemRows.erase(guid);
       _fallbackTimers.erase(guid);
+      _lastStreamMs.erase(guid);
       if (auto node = _onDemandItemRows.extract(guid))
         onDemand = node.mapped();
     }
@@ -3648,15 +3654,17 @@ public:
 
     uint32 const guid = player->GetGUID().GetCounter();
     bool expired = false;
+    bool force = false;
     {
       std::lock_guard lock(_mutex);
       auto const itr = _fallbackTimers.find(guid);
       if (itr != _fallbackTimers.end())
       {
-        if (itr->second > diff)
-          itr->second -= diff;
+        if (itr->second.DelayMs > diff)
+          itr->second.DelayMs -= diff;
         else
         {
+          force = itr->second.Force;
           _fallbackTimers.erase(itr);
           expired = true;
         }
@@ -3664,10 +3672,10 @@ public:
     }
 
     if (expired)
-      SendPatchStream(player);
+      SendPatchStream(player, force);
   }
 
-  void SendPatchStream(Player *player) {
+  void SendPatchStream(Player *player, bool force = false) {
     if (!ascensionCompatConfig.GetConfigValue<bool>(
             AscensionCompatConfig::SEND_DISPLAY_PATCHES))
       return;
@@ -3676,9 +3684,24 @@ public:
     PreparedPatchRows const &rows = GetPreparedPatchRows();
     {
       std::lock_guard lock(_mutex);
+      if (force)
+      {
+        auto const last = _lastStreamMs.find(guid);
+        if (last != _lastStreamMs.end())
+        {
+          uint32 const elapsed = GetMSTimeDiffToNow(last->second);
+          if (elapsed < DISPLAY_PATCH_RESEND_COOLDOWN_MS)
+          {
+            _fallbackTimers[guid] = { DISPLAY_PATCH_RESEND_COOLDOWN_MS - elapsed, true };
+            return;
+          }
+        }
+        _streamedPlayers.erase(guid);
+      }
       if (!_streamedPlayers.insert(guid).second)
         return;
       _fallbackTimers.erase(guid);
+      _lastStreamMs[guid] = getMSTime();
     }
 
     std::vector<ItemPatchRow> itemRows;
@@ -3689,6 +3712,9 @@ public:
     uint32 const startTime = getMSTime();
 
     std::size_t bytes = SendLoadingScreenRow(player);
+
+    for (CreatureModelPatchRow const &row : rows.CreatureModels)
+      bytes += SendCreatureModelRow(player, row);
 
     uint32 sent = 0;
     for (uint32 displayId : rows.CreatureDisplayIds) {
@@ -3718,11 +3744,14 @@ public:
     for (SuperTrackPatchRow const &row : rows.SuperTracks)
       bytes += SendSuperTrackRow(player, row);
 
+    for (ShapeshiftFormPatchRow const &row : rows.ShapeshiftForms)
+      bytes += SendShapeshiftFormRow(player, row);
+
     LOG_INFO("coa",
-             "Streamed {} CreatureDisplayInfo, {} ItemDisplayInfo, {} of {} Item, "
-             "{} Spell and {} SuperTrack patch rows ({} bytes) to {} in {} ms",
-             sent, rows.ItemDisplayInfos.size(), sentItems.Rows,
-             rows.Items.size(), sentSpells, rows.SuperTracks.size(), bytes,
+             "Streamed {} CreatureModelData, {} CreatureDisplayInfo, {} ItemDisplayInfo, {} of {} Item, "
+             "{} Spell, {} SuperTrack and {} SpellShapeshiftForm patch rows ({} bytes) to {} in {} ms",
+             rows.CreatureModels.size(), sent, rows.ItemDisplayInfos.size(), sentItems.Rows,
+             rows.Items.size(), sentSpells, rows.SuperTracks.size(), rows.ShapeshiftForms.size(), bytes,
              player->GetName(), GetMSTimeDiffToNow(startTime));
   }
 
@@ -3744,6 +3773,23 @@ private:
 
   using ItemPatchRow = std::array<uint32, 8>;
   using SuperTrackPatchRow = std::array<uint32, 8>;
+
+  static constexpr uint32 SHAPESHIFT_FORM_DBC_FIELD_COUNT = 35;
+  static constexpr uint32 SHAPESHIFT_FORM_NAME_FIELD = 2;
+  static constexpr uint32 SHAPESHIFT_FORM_FIRST_NUMERIC_FIELD = 19;
+
+  struct ShapeshiftFormPatchRow {
+    std::array<uint32, 18> Values{};
+    std::string Name;
+  };
+
+  static constexpr uint32 CREATURE_MODEL_DATA_FIELD_COUNT = 28;
+  static constexpr uint32 CREATURE_MODEL_DATA_NAME_FIELD = 2;
+
+  struct CreatureModelPatchRow {
+    std::array<uint32, CREATURE_MODEL_DATA_FIELD_COUNT> Values{};
+    std::string ModelName;
+  };
 
   struct PatchRowTally {
     uint32 Rows = 0;
@@ -3797,6 +3843,8 @@ private:
     std::unordered_map<uint32, std::size_t> ItemRowIndexById;
     std::vector<SpellPatchRow> Spells;
     std::vector<SuperTrackPatchRow> SuperTracks;
+    std::vector<ShapeshiftFormPatchRow> ShapeshiftForms;
+    std::vector<CreatureModelPatchRow> CreatureModels;
   };
 
   static std::unordered_set<uint32> CollectOwnedItemIds(Player *player) {
@@ -3890,6 +3938,16 @@ private:
     return SendRowPacket(player, packet);
   }
 
+  std::size_t SendCreatureModelRow(Player *player,
+                                   CreatureModelPatchRow const &row) const {
+    WorldPacket packet(SMSG_PATCH_CREATURE_MODEL_DATA,
+                       row.Values.size() * sizeof(uint32) + sizeof(uint32) + row.ModelName.size());
+    for (uint32 value : row.Values)
+      packet << value;
+    AppendSizedString(packet, row.ModelName);
+    return SendRowPacket(player, packet);
+  }
+
   std::size_t SendItemDisplayInfoRow(Player *player,
                                      ItemDisplayInfoPatchRow const &row) const {
     WorldPacket packet(SMSG_PATCH_ITEM_DISPLAY_INFO, 160);
@@ -3923,6 +3981,59 @@ private:
     for (uint32 value : row)
       packet << value;
     return SendRowPacket(player, packet);
+  }
+
+  std::size_t SendShapeshiftFormRow(Player *player,
+                                   ShapeshiftFormPatchRow const &row) const {
+    WorldPacket packet(SMSG_PATCH_SPELL_SHAPESHIFT_FORM,
+                       row.Values.size() * sizeof(uint32) + sizeof(uint32) + row.Name.size());
+    for (uint32 value : row.Values)
+      packet << value;
+    AppendSizedString(packet, row.Name);
+    return SendRowPacket(player, packet);
+  }
+
+  static std::vector<ShapeshiftFormPatchRow> LoadShapeshiftFormPatchRows() {
+    std::vector<ShapeshiftFormPatchRow> rows;
+    QueryResult result = WorldDatabase.Query(
+        "SELECT `ID`, `BonusActionBar` FROM `coa_client_shapeshift_form` ORDER BY `ID`");
+    if (!result)
+      return rows;
+
+    std::map<uint32, uint32> bonusBars;
+    do {
+      Field const *fields = result->Fetch();
+      bonusBars[fields[0].Get<uint32>()] = fields[1].Get<uint32>();
+    } while (result->NextRow());
+
+    ClientDBC forms;
+    std::filesystem::path const serverDbc =
+        std::filesystem::path(sWorld->GetDataPath()) / "dbc" / "SpellShapeshiftForm.dbc";
+    if (!forms.Load(serverDbc.string(), SHAPESHIFT_FORM_DBC_FIELD_COUNT))
+    {
+      LOG_ERROR("coa", "Cannot read {}; coa_client_shapeshift_form rows are not streamed", serverDbc.generic_string());
+      return rows;
+    }
+
+    for (uint32 index = 0; index < forms.GetRecordCount(); ++index)
+    {
+      ClientDBC::Record const record = forms.GetRecord(index);
+      auto const bonusBar = bonusBars.find(record.GetUInt32(0));
+      if (bonusBar == bonusBars.end())
+        continue;
+
+      ShapeshiftFormPatchRow &row = rows.emplace_back();
+      row.Values[0] = bonusBar->first;
+      row.Values[1] = bonusBar->second;
+      for (uint32 slot = 2; slot < row.Values.size(); ++slot)
+        row.Values[slot] = record.GetUInt32(SHAPESHIFT_FORM_FIRST_NUMERIC_FIELD + slot - 2);
+      row.Name = std::string(record.GetString(SHAPESHIFT_FORM_NAME_FIELD));
+      bonusBars.erase(bonusBar);
+    }
+
+    for (auto const &[form, bonusBar] : bonusBars)
+      LOG_ERROR("coa", "coa_client_shapeshift_form {} has no SpellShapeshiftForm.dbc row", form);
+    return rows;
   }
 
   static std::vector<SuperTrackPatchRow> LoadSuperTrackPatchRows() {
@@ -3966,6 +4077,8 @@ private:
           [this](std::size_t left, std::size_t right) { return _rows.Items[left][0] > _rows.Items[right][0]; });
       _rows.Spells = BuildSpellPatchRows();
       _rows.SuperTracks = LoadSuperTrackPatchRows();
+      _rows.ShapeshiftForms = LoadShapeshiftFormPatchRows();
+      _rows.CreatureModels = BuildCreatureModelPatchRows();
       _rowsPrepared = true;
     }
     return _rows;
@@ -4040,6 +4153,45 @@ private:
         else
           row.Values[field] = record.GetUInt32(field);
       }
+    }
+
+    return rows;
+  }
+
+  static std::vector<CreatureModelPatchRow> BuildCreatureModelPatchRows() {
+    std::vector<CreatureModelPatchRow> rows;
+    ClientDBC clientModels;
+    std::filesystem::path const clientDbc =
+        std::filesystem::path(sWorld->GetDataPath()) / "dbc" / "CreatureModelData.dbc";
+    if (!clientModels.Load(clientDbc.string(), CREATURE_MODEL_DATA_FIELD_COUNT))
+      return rows;
+
+    for (uint32 index = 0; index < clientModels.GetRecordCount(); ++index) {
+      ClientDBC::Record const record = clientModels.GetRecord(index);
+      CreatureModelDataEntry const *entry =
+          sCreatureModelDataStore.LookupEntry(record.GetUInt32(0));
+      if (!entry)
+        continue;
+
+      std::array<std::pair<uint32, uint32>, 5> const serverFields = {{
+          {1, entry->Flags},
+          {4, std::bit_cast<uint32>(entry->Scale)},
+          {14, std::bit_cast<uint32>(entry->CollisionWidth)},
+          {15, std::bit_cast<uint32>(entry->CollisionHeight)},
+          {16, std::bit_cast<uint32>(entry->MountHeight)}}};
+      auto const matchesClient = [&record](auto const &field) {
+        return record.GetUInt32(field.first) == field.second;
+      };
+      if (std::ranges::all_of(serverFields, matchesClient))
+        continue;
+
+      CreatureModelPatchRow &row = rows.emplace_back();
+      for (uint32 field = 0; field < CREATURE_MODEL_DATA_FIELD_COUNT; ++field)
+        if (field != CREATURE_MODEL_DATA_NAME_FIELD)
+          row.Values[field] = record.GetUInt32(field);
+      for (auto const &[field, value] : serverFields)
+        row.Values[field] = value;
+      row.ModelName = std::string(record.GetString(CREATURE_MODEL_DATA_NAME_FIELD));
     }
 
     return rows;
@@ -4175,11 +4327,14 @@ private:
             AscensionBloodmage::RuntimeExcludeCasterAuraSpell(
                 record.GetUInt32(SPELL_FAMILY_NAME_FIELD), excludedAura);
         bool const redirectsExclusion = clientExcludedAura != excludedAura;
+        bool const restrictingFormGated =
+            clientExcludedAura == AscensionBloodmage::CursedForm;
 
         auto const overlay = overridden.find(id);
         auto const description = descriptions.find(id);
         if (overlay == overridden.end() && description == descriptions.end() &&
-            !requested.contains(id) && !redirectsExclusion)
+            !requested.contains(id) && !redirectsExclusion &&
+            !restrictingFormGated)
           continue;
 
         std::size_t const rowIndex = overlay == overridden.end() ? rows.size() : overlay->second;
@@ -4209,11 +4364,13 @@ private:
           descriptions.erase(description);
         }
         if (redirectsExclusion)
-        {
           row.Values[SPELL_WIRE_SLOT(SPELL_EXCLUDE_CASTER_AURA_SPELL_FIELD)] =
               clientExcludedAura;
+        if (restrictingFormGated)
+        {
           RedirectCursedFormCheck(row.Strings[SPELL_WIRE_DESCRIPTION]);
           RedirectCursedFormCheck(row.Strings[SPELL_WIRE_TOOLTIP]);
+          Ascension::ClientSpellPatches::Instance().Register(id);
         }
         requested.erase(id);
       }
@@ -4362,7 +4519,14 @@ private:
   std::unordered_set<uint32> _streamedPlayers;
   std::unordered_map<uint32, std::unordered_set<uint32>> _sentItemRows;
   std::unordered_map<uint32, PatchRowTally> _onDemandItemRows;
-  std::unordered_map<uint32, uint32> _fallbackTimers;
+  struct FallbackResend
+  {
+    uint32 DelayMs;
+    bool Force;
+  };
+
+  std::unordered_map<uint32, FallbackResend> _fallbackTimers;
+  std::unordered_map<uint32, uint32> _lastStreamMs;
 
   std::mutex _cacheMutex;
   bool _rowsPrepared = false;
@@ -4524,8 +4688,8 @@ public:
     {
       return queued.GetOpcode() == CMSG_EXTENSION_INITIALIZED;
     };
-    if (isWorldEntryNotice(packet) && std::any_of(queue.begin(), queue.end(), isWorldEntryNotice))
-      return;
+    if (isWorldEntryNotice(packet))
+      queue.erase(std::remove_if(queue.begin(), queue.end(), isWorldEntryNotice), queue.end());
 
     if (queue.size() >= MAX_QUEUED_EXTENSION_PACKETS)
     {
@@ -4533,7 +4697,10 @@ public:
       return;
     }
 
-    queue.emplace_back(packet);
+    if (isWorldEntryNotice(packet))
+      queue.emplace_front(packet);
+    else
+      queue.emplace_back(packet);
   }
 
   void RejectClientPacket(uint32 accountId, WorldPacket const& packet, std::string_view reason)
@@ -5603,7 +5770,7 @@ private:
         SendSecureAddonList(player->GetSession());
         player->SendAllSpellChargeStates();
         SendAscensionRunemasterEchoesCooldown(player);
-        AscensionDisplayPatchService::Instance().SendPatchStream(player);
+        AscensionDisplayPatchService::Instance().SendPatchStream(player, true);
         LOG_DEBUG("coa", "Resent spell charge state to {} after client world entry",
                   player->GetName());
         break;
@@ -5874,10 +6041,31 @@ public:
         if (!session)
             return;
 
-        WorldPacket packet(SMSG_ASCENSION_SECURE_ADDONS, 32);
-        packet << uint32(1);
-        packet << "Ascension_HelpUI";
-        packet << uint8(1);
+        static constexpr std::array<std::string_view, 33> ascensionAddons = {
+            "AscensionResources", "AscensionUI", "Ascension_AddonPanel", "Ascension_AppearanceUI",
+            "Ascension_BuildCreator", "Ascension_ChallengesUI", "Ascension_CharacterAdvancement",
+            "Ascension_CharacterAdvancementSeason9", "Ascension_CoATalents", "Ascension_Collections",
+            "Ascension_CompactRaidFrames", "Ascension_Draft", "Ascension_EnchantCollection",
+            "Ascension_ForcedPrimaryStat", "Ascension_HelpUI", "Ascension_InspectUI", "Ascension_Manastorm",
+            "Ascension_MythicPlus", "Ascension_NamePlates", "Ascension_NewPlayerExperience",
+            "Ascension_PTRFeedback", "Ascension_PathToAscension", "Ascension_Poll",
+            "Ascension_RandomModeShared", "Ascension_SeasonCollection", "Ascension_SkillCards",
+            "Ascension_TalentUI", "Ascension_TicketUI", "Ascension_UIDevelopmentTools",
+            "Ascension_VanityCollection", "Ascension_Warmode", "Ascension_WarmodeLegacy", "Ascension_WildCard",
+        };
+
+        std::vector<std::string> names = session->GetClientAddonNames();
+        for (std::string_view addon : ascensionAddons)
+            if (std::find(names.begin(), names.end(), addon) == names.end())
+                names.emplace_back(addon);
+
+        WorldPacket packet(SMSG_ASCENSION_SECURE_ADDONS, sizeof(uint32) + names.size() * 32);
+        packet << uint32(names.size());
+        for (std::string const& name : names)
+        {
+            packet << name;
+            packet << uint8(name.starts_with("Blizzard_") || name.starts_with("Ascension"));
+        }
         session->SendPacket(&packet);
     }
 
