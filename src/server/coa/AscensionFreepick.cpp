@@ -7,12 +7,15 @@
 #include "Battleground.h"
 #include "Chat.h"
 #include "Config.h"
+#include "GameEventMgr.h"
+#include "Item.h"
 #include "Log.h"
 #include "Map.h"
 #include "Pet.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "SpellScript.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
@@ -48,6 +51,7 @@ Realm ReadRealm()
 namespace
 {
 constexpr char BUILD_SETTING[] = "core.freepick";
+constexpr std::uint16_t COA_CLASS_TRAINERS_EVENT = 195;
 constexpr char ACTIVE_SPECIALIZATION_SETTING[] = "core.ascension_slot.active";
 constexpr std::uint32_t RANK_FACTOR = 10;
 constexpr uint16 SMSG_CHARACTER_ADVANCEMENT_ACTIVE_SPEC = 0x0725;
@@ -56,6 +60,7 @@ constexpr uint16 SMSG_CHARACTER_ADVANCEMENT_KNOWN_ENTRIES = 0x0726;
 Catalog Loaded;
 Realm CurrentRealm;
 bool Classless = false;
+bool MysticAltars = false;
 bool Reborn = false;
 
 std::string SpecializationBuildSetting(std::uint32_t index)
@@ -215,6 +220,11 @@ void SyncSpells(Player* player, std::vector<Entry> const& before, std::vector<En
 bool RealmIsClassless()
 {
     return Classless;
+}
+
+bool RealmOffersMysticAltars()
+{
+    return MysticAltars;
 }
 
 bool IsFreepickHero(Player const* player)
@@ -421,6 +431,10 @@ public:
         CurrentRealm = ReadRealm();
         Classless = sConfigMgr->GetOption<std::string>("CoA.ClassModel", "coa") == "hero";
         Reborn = CurrentRealm.WarcraftReborn;
+        MysticAltars = (Classless || Reborn) &&
+            !AscensionWildcard::PlaysWildcard(sConfigMgr->GetOption<std::string>("CoAChallenges.GameModes.Realm", ""));
+        if (CurrentRealm.ConquestOfAzeroth)
+            sGameEventMgr->StartInternalEvent(COA_CLASS_TRAINERS_EVENT);
         if ((Classless || Reborn) && !LoadCatalog(Loaded))
             LOG_ERROR("coa", "Free-pick Character Advancement is unavailable: its client DBCs did not load");
     }
@@ -458,10 +472,58 @@ void ApplyAscensionPathPassiveContract(SpellInfo* spellInfo)
     cost.BasePoints = -9;
 }
 
+namespace
+{
+class ghostly_strike_contracts : public GlobalScript
+{
+public:
+    ghostly_strike_contracts() : GlobalScript("ghostly_strike_contracts",
+        {GLOBALHOOK_ON_LOAD_SPELL_CUSTOM_ATTR}) { }
+
+    void OnLoadSpellCustomAttr(SpellInfo* info) override
+    {
+        if (info->Id == 965819 && info->Effects[EFFECT_2].ApplyAuraName == 229)
+            info->Effects[EFFECT_2].ApplyAuraName = SPELL_AURA_MOD_PARRY_PERCENT;
+    }
+};
+
+class spell_ascension_ghostly_strike : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_ghostly_strike);
+
+    bool Validate(SpellInfo const*) override
+    {
+        return ValidateSpellInfo({965819});
+    }
+
+    void Defend(SpellEffIndex)
+    {
+        Player* player = GetCaster()->ToPlayer();
+        if (!player)
+            return;
+        Item const* weapon = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_MAINHAND);
+        bool const twoHanded = weapon && weapon->GetTemplate()->InventoryType == INVTYPE_2HWEAPON &&
+            !player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND);
+        int32 const amount = sSpellMgr->AssertSpellInfo(965819)->Effects[EFFECT_1].CalcValue(player);
+        CustomSpellValues values;
+        values.AddSpellMod(SPELLVALUE_BASE_POINT1, twoHanded ? 0 : amount);
+        values.AddSpellMod(SPELLVALUE_BASE_POINT2, twoHanded ? amount : 0);
+        player->CastCustomSpell(965819, values, player, TRIGGERED_FULL_MASK);
+    }
+
+    void Register() override
+    {
+        OnEffectHitTarget += SpellEffectFn(spell_ascension_ghostly_strike::Defend, EFFECT_1, SPELL_EFFECT_DUMMY);
+    }
+};
+}
+
 void AddAscensionFreepickScripts()
 {
     new AscensionFreepick::AscensionFreepickPlayer();
     new AscensionFreepick::AscensionFreepickWorld();
+    new ghostly_strike_contracts();
+    RegisterSpellScript(spell_ascension_ghostly_strike);
     RegisterSpellScriptWithArgs(AscensionFreepick::spell_ascension_freepick_specialization_swap,
         "spell_ascension_freepick_specialization_swap");
 }

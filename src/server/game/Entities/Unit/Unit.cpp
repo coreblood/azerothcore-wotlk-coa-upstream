@@ -9892,6 +9892,9 @@ int32 Unit::SpellBaseDamageBonusDone(SpellSchoolMask schoolMask)
         }
         // ... and attack power
         DoneAdvertisedBenefit += int32(CalculatePct(GetTotalAttackPowerValue(BASE_ATTACK), GetTotalAuraModifierByMiscMask(SPELL_AURA_MOD_SPELL_DAMAGE_OF_ATTACK_POWER, schoolMask)));
+        if (HasAura(84866))
+            DoneAdvertisedBenefit = int32(std::clamp<int64>(int64(DoneAdvertisedBenefit) * 2,
+                std::numeric_limits<int32>::min(), std::numeric_limits<int32>::max()));
     }
     return DoneAdvertisedBenefit;
 }
@@ -10696,6 +10699,9 @@ int32 Unit::SpellBaseHealingBonusDone(SpellSchoolMask schoolMask)
 
         // ... and attack power
         AdvertisedBenefit += int32(CalculatePct(GetTotalAttackPowerValue(BASE_ATTACK), GetTotalAuraModifierByMiscMask(SPELL_AURA_MOD_SPELL_HEALING_OF_ATTACK_POWER, schoolMask)));
+        if (HasAura(84866))
+            AdvertisedBenefit = int32(std::clamp<int64>(int64(AdvertisedBenefit) * 2,
+                std::numeric_limits<int32>::min(), std::numeric_limits<int32>::max()));
     }
     return AdvertisedBenefit;
 }
@@ -15750,10 +15756,14 @@ bool Unit::SetCharmedBy(Unit* charmer, CharmType type, AuraApplication const* au
         GetMotionMaster()->MoveIdle();
         StopMoving();
 
-        if (charmer->IsPlayer() && charmer->IsClass(CLASS_WARLOCK, CLASS_CONTEXT_PET_CHARM) && ToCreature()->GetCreatureTemplate()->type == CREATURE_TYPE_DEMON)
+        Creature* charmed = ToCreature();
+        bool const controlMechanical = type == CHARM_TYPE_CHARM && aurApp && aurApp->GetBase()->GetId() == 807846 &&
+            charmed->GetCreatureTemplate()->type == CREATURE_TYPE_MECHANICAL;
+        if (charmer->IsPlayer() && (controlMechanical ||
+            (charmer->IsClass(CLASS_WARLOCK, CLASS_CONTEXT_PET_CHARM) &&
+                charmed->GetCreatureTemplate()->type == CREATURE_TYPE_DEMON)))
         {
-            // Disable CreatureAI/SmartAI and switch to CharmAI when charmed by warlock
-            Creature* charmed = ToCreature();
+            // Use pet AI for Enslave Demon and Control Mechanical.
             charmed->NeedChangeAI = true;
             charmed->IsAIEnabled = false;
         }

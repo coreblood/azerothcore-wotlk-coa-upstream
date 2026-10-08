@@ -918,7 +918,8 @@ void Player::UpdateParryPercentage()
     m_realParry = 0.0f;
     // Starcaller and Primalist need Hunter's parry curve; their general Druid fallback has no parry cap.
     // Sun Cleric's March of the Valkyr uses the Paladin curve with its Strength-based melee scaling.
-    Classes const parryClass = getClass() == CLASS_STARCALLER || getClass() == CLASS_WILDWALKER ? CLASS_HUNTER :
+    Classes const parryClass = getClass() == CLASS_HERO || getClass() == CLASS_STARCALLER ||
+        getClass() == CLASS_WILDWALKER ? CLASS_HUNTER :
         getClass() == CLASS_SUN_CLERIC ? CLASS_PALADIN :
         GetLegacyClassForCustomClass(Classes(getClass()));
     uint32 const pclass = parryClass - 1;
@@ -1087,7 +1088,8 @@ void Player::ApplyHealthRegenBonus(int32 amount, bool apply)
 
 void Player::UpdateManaRegen()
 {
-    if (HasAuraTypeWithMiscvalue(SPELL_AURA_PREVENT_REGENERATE_POWER, POWER_MANA + 1))
+    if (HasAuraTypeWithMiscvalue(SPELL_AURA_PREVENT_REGENERATE_POWER, POWER_MANA + 1)
+        || !sScriptMgr->OnPlayerCanRegenerate(this, POWER_MANA))
     {
         SetStatFloatValue(UNIT_FIELD_POWER_REGEN_INTERRUPTED_FLAT_MODIFIER, 0);
         SetStatFloatValue(UNIT_FIELD_POWER_REGEN_FLAT_MODIFIER, 0);
