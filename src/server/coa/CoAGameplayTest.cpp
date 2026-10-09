@@ -7,6 +7,7 @@
 #include "AccountMgr.h"
 #include "AscensionCoATalentState.h"
 #include "AscensionItemScaling.h"
+#include "AscensionNativeItemScaling.h"
 #include "AscensionQuestLog.h"
 #include "AscensionSpecialization.h"
 #include "AscensionWisdomball.h"
@@ -18,6 +19,7 @@
 #include "CharmInfo.h"
 #include "Chat.h"
 #include "ClientDBC.h"
+#include "CoACreatureScaling.h"
 #include "Config.h"
 #include "Creature.h"
 #include "CreatureAI.h"
@@ -395,6 +397,7 @@ struct Actor
     uint32 vendorWindows = 0;
     uint32 vendorItems = 0;
     std::map<uint32, uint32> vendorPrice;
+    std::map<uint32, uint32> vendorExtendedCost;
     uint32 vendorPriceSum = 0;
     uint32 whoResponses = 0;
     uint32 lootReceived = 0;
@@ -624,7 +627,7 @@ void ObserveExtensionPacket(Actor& actor, WorldPacket const& packet)
         packet.GetOpcode() != SMSG_MOVE_UNSET_CAN_FLY && packet.GetOpcode() != SMSG_CONVERT_RUNE &&
         packet.GetOpcode() != SMSG_ADD_RUNE_POWER && packet.GetOpcode() != SMSG_LEARNED_SPELL &&
         packet.GetOpcode() != SMSG_SUPERCEDED_SPELL && packet.GetOpcode() != SMSG_REMOVED_SPELL &&
-        packet.GetOpcode() != SMSG_ITEM_QUERY_SINGLE_RESPONSE)
+        packet.GetOpcode() != SMSG_ITEM_QUERY_SINGLE_RESPONSE && packet.GetOpcode() != SMSG_MOVE_KNOCK_BACK)
         return;
 
     ++actor.extensionPackets[packet.GetOpcode()];
@@ -1054,6 +1057,7 @@ void ObservePacket(Actor& actor, WorldPacket const& packet)
         ++actor.vendorWindows;
         actor.vendorItems = rows;
         actor.vendorPrice.clear();
+        actor.vendorExtendedCost.clear();
         actor.vendorPriceSum = 0;
         for (uint8 i = 0; i < rows; ++i)
         {
@@ -1070,6 +1074,7 @@ void ObservePacket(Actor& actor, WorldPacket const& packet)
             if (shelfItem != 0)
             {
                 actor.vendorPrice[shelfItem] = price;
+                actor.vendorExtendedCost[shelfItem] = extendedCost;
                 actor.vendorPriceSum += price;
             }
         }
@@ -1120,6 +1125,8 @@ public:
         Require(_scenario.get<uint32>("schema") == 1, "Unsupported scenario schema");
         _timeout = _scenario.get<uint32>("timeout_ms", 90000);
         Require(_timeout > 0 && _timeout <= 600000, "Invalid scenario timeout");
+        if (_scenario.get<bool>("creature_scaling", false))
+            _creatureScaling.emplace();
         _report.put("schema", 1);
         _report.put("run_id", _runId);
         _report.put("scenario", _scenario.get<std::string>("name"));
@@ -1907,6 +1914,8 @@ private:
             return unit->GetVictim() == GetUnit(step.get<std::string>("target")) ? 1.0 : 0.0;
         if (metric == "player_name")
             return unit->GetName() == step.get<std::string>("name") ? 1.0 : 0.0;
+        if (metric == "race")
+            return unit->getRace();
         if (metric == "name_lookup")
         {
             std::string name = step.get<std::string>("name");
@@ -2042,6 +2051,11 @@ private:
             lfg::LFGDungeonData const* dungeon = sLFGMgr->GetLFGDungeon(step.get<uint32>("dungeon"));
             Require(dungeon != nullptr, "LFG disable metric needs a known dungeon");
             return sLFGMgr->IsDungeonDisabled(dungeon->map, Difficulty(dungeon->difficulty)) ? 1 : 0;
+        }
+        if (metric == "lfg_state")
+        {
+            Require(unit->IsPlayer(), "LFG state needs a player");
+            return double(sLFGMgr->GetState(unit->GetGUID()));
         }
         if (metric == "view_level")
             return GetUnit(step.get<std::string>("target"))->getLevelForTarget(unit);
@@ -2466,6 +2480,12 @@ private:
             auto const& prices = _actors.at(step.get<std::string>("actor")).vendorPrice;
             auto const found = prices.find(step.get<uint32>("item", 0));
             return found == prices.end() ? -1.0 : double(found->second);
+        }
+        if (metric == "vendor_extended_cost")
+        {
+            auto const& costs = _actors.at(step.get<std::string>("actor")).vendorExtendedCost;
+            auto const found = costs.find(step.get<uint32>("item", 0));
+            return found == costs.end() ? -1.0 : double(found->second);
         }
         if (metric == "quest_rewarded")
         {
@@ -3107,6 +3127,12 @@ private:
             Require(creature != nullptr, "Attack observation needs a present owned creature");
             return GetUnit(step.get<std::string>("target"))->IsValidAttackTarget(creature);
         }
+        if (metric == "owned_creature_victim")
+        {
+            Creature* creature = GetOwnedCreature(player, step.get<uint32>("entry"));
+            Require(creature != nullptr, "Victim observation needs a present owned creature");
+            return creature->GetVictim() == GetUnit(step.get<std::string>("target"));
+        }
         if (metric == "owned_creature_weapon_damage_min")
         {
             uint32 entry = step.get<uint32>("entry");
@@ -3218,7 +3244,8 @@ private:
             metric == "pet_aura_amplitude_ms" || metric == "pet_aura_duration_ms" || metric == "pet_max_health" ||
             metric == "pet_health" ||
             metric == "pet_attack_power" || metric == "pet_run_speed_rate" || metric == "pet_is_banker" ||
-            metric == "pet_display" || metric == "pet_scale" || metric == "pet_knows_spell" ||
+            metric == "pet_display" || metric == "pet_native_display" || metric == "pet_scale" ||
+            metric == "pet_knows_spell" ||
             metric == "pet_distance" || metric == "pet_spell_bar_count")
         {
             Creature* pet = player->GetGuardianPet();
@@ -3232,6 +3259,8 @@ private:
                 return pet && pet->HasNpcFlag(UNIT_NPC_FLAG_BANKER);
             if (metric == "pet_display")
                 return pet ? pet->GetDisplayId() : 0;
+            if (metric == "pet_native_display")
+                return pet ? pet->GetNativeDisplayId() : 0;
             if (metric == "pet_scale")
                 return pet ? double(pet->GetObjectScale()) : 0.0;
             if (metric == "pet_spell_bar_count")
@@ -3535,13 +3564,38 @@ private:
             auto excluded = step.get_optional<uint32>("exclude");
             uint32 const minRequiredLevel = step.get<uint32>("min_required_level", 0);
             uint32 const maxRequiredLevel = step.get<uint32>("max_required_level", STRONG_MAX_LEVEL);
+            auto dominantStat = step.get_optional<uint32>("dominant_stat");
+            auto offStat = step.get_optional<uint32>("off_stat");
+            auto strongestAttributes = [](ItemTemplate const* proto)
+            {
+                std::array<int32, ITEM_MOD_SPIRIT + 1> attributes{};
+                for (uint32 index = 0; index < proto->StatsCount && index < MAX_ITEM_PROTO_STATS; ++index)
+                {
+                    uint32 const type = proto->ItemStat[index].ItemStatType;
+                    if (type >= ITEM_MOD_AGILITY && type <= ITEM_MOD_SPIRIT && proto->ItemStat[index].ItemStatValue > 0)
+                        attributes[type] += proto->ItemStat[index].ItemStatValue;
+                }
+                int32 const strongest = *std::max_element(attributes.begin(), attributes.end());
+                std::unordered_set<uint32> stats;
+                for (uint32 type = ITEM_MOD_AGILITY; strongest > 0 && type <= ITEM_MOD_SPIRIT; ++type)
+                    if (attributes[type] == strongest)
+                        stats.insert(type);
+                return stats;
+            };
             uint32 count = 0;
-            auto countItem = [pool, &count, &excluded, minRequiredLevel, maxRequiredLevel](Item* item)
+            auto countItem = [pool, &count, &excluded, minRequiredLevel, maxRequiredLevel, &dominantStat, &offStat,
+                &strongestAttributes](Item* item)
             {
                 if (excluded && item->GetEntry() == *excluded)
                     return;
                 uint32 const requiredLevel = item->GetTemplate()->RequiredLevel;
                 if (requiredLevel < minRequiredLevel || requiredLevel > maxRequiredLevel)
+                    return;
+                ItemTemplate const* base = sObjectMgr->GetItemTemplate(ItemScaling::BaseEntry(item->GetEntry()));
+                std::unordered_set<uint32> const strongest = strongestAttributes(base ? base : item->GetTemplate());
+                if (dominantStat && !strongest.count(*dominantStat))
+                    return;
+                if (offStat && (strongest.empty() || strongest.count(*offStat)))
                     return;
                 if (!pool || pool->count(ItemScaling::BaseEntry(item->GetEntry())))
                     count += item->GetCount();
@@ -3556,7 +3610,8 @@ private:
                             countItem(item);
             return count;
         }
-        if (metric == "carried_item_level" || metric == "carried_item_required_level")
+        if (metric == "carried_item_level" || metric == "carried_item_required_level" ||
+            metric == "carried_item_armor" || metric == "carried_item_scaling_level")
         {
             uint32 const baseEntry = step.get<uint32>("item");
             Require(sObjectMgr->GetItemTemplate(baseEntry) != nullptr, "Unknown item in metric");
@@ -3565,8 +3620,15 @@ private:
             {
                 if (ItemScaling::BaseEntry(item->GetEntry()) != baseEntry)
                     return;
-                ItemTemplate const* proto = item->GetTemplate();
-                highest = std::max(highest, metric == "carried_item_level" ? proto->ItemLevel : proto->RequiredLevel);
+                ItemTemplate const* proto = LocalLevelScaling::InstanceTemplateFor(item, item->GetTemplate());
+                uint32 value = proto->ItemLevel;
+                if (metric == "carried_item_required_level")
+                    value = proto->RequiredLevel;
+                else if (metric == "carried_item_armor")
+                    value = proto->Armor;
+                else if (metric == "carried_item_scaling_level")
+                    value = NativeItemScaling::InstanceLevel(item);
+                highest = std::max(highest, value);
             };
             for (uint8 slot = EQUIPMENT_SLOT_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
                 if (Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
@@ -3706,7 +3768,7 @@ private:
             });
             return selected == known.end() ? 0 : selected->Rank;
         }
-        if (metric == "server_packet_u32")
+        if (metric == "server_packet_u32" || metric == "server_packet_float")
         {
             Actor const& actor = _actors.at(step.get<std::string>("actor"));
             uint16 const opcode = uint16(step.get<uint32>("opcode"));
@@ -3735,11 +3797,23 @@ private:
                 ++offset;
             }
             offset += std::size_t(index) * sizeof(uint32);
+            if (metric == "server_packet_float" && step.get<bool>("from_end", false))
+            {
+                std::size_t const tail = (std::size_t(index) + 1) * sizeof(uint32);
+                if (tail > payload->size())
+                    return -1;
+                offset = payload->size() - tail;
+            }
             if (offset > payload->size() || payload->size() - offset < sizeof(uint32))
                 return -1;
             uint32 value = 0;
             for (uint32 byte = 0; byte < sizeof(uint32); ++byte)
                 value |= uint32(uint8((*payload)[offset + byte])) << (byte * 8);
+            if (metric == "server_packet_float")
+            {
+                float const number = std::bit_cast<float>(value);
+                return std::isfinite(number) ? double(number) : -1;
+            }
             return value;
         }
         if (metric == "quest_log_sent_level" || metric == "quest_log_sent_xp")
@@ -3970,8 +4044,20 @@ private:
             if (!_relogging)
             {
                 Player* player = GetPlayer(step.get<std::string>("actor"));
+                auto const race = step.get_optional<uint32>("race");
+                if (race)
+                    Require(*race > 0 && *race <= 255 && sObjectMgr->GetPlayerInfo(uint8(*race), player->getClass()),
+                        "Relog race needs an available race/class combination");
                 CharacterDatabaseTransaction transaction = CharacterDatabase.BeginTransaction();
                 player->SaveToDB(transaction, false, true);
+                if (race)
+                {
+                    CharacterDatabasePreparedStatement* change =
+                        CharacterDatabase.GetPreparedStatement(CHAR_UPD_CHAR_RACE);
+                    change->SetData(0, uint8(*race));
+                    change->SetData(1, player->GetGUID().GetCounter());
+                    transaction->Append(change);
+                }
                 _relogSave.emplace(CharacterDatabase.AsyncCommitTransaction(transaction));
                 _relogging = true;
                 return;
@@ -3983,6 +4069,12 @@ private:
                 Require(_relogSave->m_future.get(), "Relog save transaction failed");
                 _relogSave.reset();
                 actor.session->LogoutPlayer(false);
+                if (auto race = step.get_optional<uint32>("race"))
+                {
+                    CharacterCacheEntry const* cached = sCharacterCache->GetCharacterCacheByGuid(actor.guid);
+                    Require(cached != nullptr, "Relog race needs a cached character");
+                    sCharacterCache->UpdateCharacterData(actor.guid, cached->Name, cached->Sex, uint8(*race));
+                }
                 LogIn(actor);
                 return;
             }
@@ -5161,6 +5253,7 @@ private:
     std::map<std::string, Target> _targets;
     std::map<std::string, double> _snapshots;
     QueryCallbackProcessor _queries;
+    std::optional<CreatureScaling::TestOverride> _creatureScaling;
 };
 
 enum class TeardownStage

@@ -353,7 +353,9 @@ maximum 10 minutes); execution counts in game time, which the simulated clock ad
 realm-local hour, for mechanics that read the time of day: the simulated clock, which otherwise starts at 10:00,
 jumps ahead to it, and the real clock runs the case in single mode with a fixed `TZ` offset
 ([realm-local time](../../docs/coa/verification.md#realm-local-time)). Every result records its start as
-`realm_local_start`.
+`realm_local_start`. Optional `creature_scaling: true` enables CoA creature scaling with its built-in multipliers
+for that case, whatever the module config says, and restores the configured state when the case ends; the batch
+runs such a case exclusively because the setting is process-global.
 The [talent and item scenario](scenarios/talent-and-items.json) exercises talent learning, passive removal,
 equipping a shirt and consuming a healing potion. It does not measure the talent's damage coefficient.
 The [Shadowblast scenario](scenarios/shadowblast-shadow-rage.json) reproduces a Shadow Rage pet-targeting crash
@@ -526,7 +528,9 @@ centre-screen notices a session has been sent and `notification_contains` takes 
 whether one carried it, which is how a test proves a player was told something in the middle of the
 screen and not only in chat. The cache metrics are `carried_pool_item_count` (needs `cache`,
 optional `table`: `prestigious`, `callboard`, or `loot` for the cache's item loot and its references, and
-optional `min_required_level`/`max_required_level` that keep only carried items in that range), `pool_variant_count`, `pool_retired_item_count`, `pool_row_count`,
+optional `min_required_level`/`max_required_level` that keep only carried items in that range; optional
+`dominant_stat` keeps items whose strongest of Agility 3, Strength 4, Intellect 5 and Spirit 6 is that stat,
+and `off_stat` keeps items that carry one of those four but whose strongest is not that stat), `pool_variant_count`, `pool_retired_item_count`, `pool_row_count`,
 `pool_item_present` (needs `item`; `table` `fire_lord` with `cache` 2400040 reads Cache of the Fire Lord's
 pool across every raid difficulty), and `cache_token_count`, `cache_token_stage`, `cache_token_present`
 (need `cache`, the last also `item`), which read the token table the realm loads and answer how many
@@ -548,6 +552,9 @@ from one that still offers it.
 count of the last one, `vendor_price` requires `item` and returns the price that list offered it at
 (`-1` when the shelves do not hold that item), and `vendor_price_sum` is what the whole list costs -
 a fingerprint of a vendor's stock, so one vendor can be held to another's items and prices.
+`vendor_extended_cost` requires `item` and returns the ItemExtendedCost id that list sold it for (`0` for a
+plain money price, `-1` when the shelves do not hold that item): the honor, arena point, token and rating
+price a client reads from its own ItemExtendedCost.dbc.
 `who_count` counts players in the actor's last native Who response; `who_class` requires a player `target`
 and returns that player's class ID, or zero if absent. These inspect packets from socketless test sessions,
 not client packet delivery. Masks use native Who bits (`1 << classID`, `1 << raceID`), with class 32 in bit zero;
@@ -693,8 +700,10 @@ quantity reached inventory and records the item/count. It supports ordinary cont
 reports the inventory increase from its last successful `collect_loot`. Closed windows return zero slots/entry.
 The `loot_*` item metrics accept an optional `item` that keeps only the slots holding that item or a level-scaled
 copy of it (entries 4400001 and up). `loot_item_armor` reads the first such slot's armor, and `loot_base_entry`
-names the authored item a copy was made from. `carried_item_level` and `carried_item_required_level` require `item` and return the highest item
-level or required level among equipped and bagged items that are that item or a copy of it, or zero without one.
+names the authored item a copy was made from. `carried_item_level`, `carried_item_required_level` and `carried_item_armor`
+require `item` and return the highest item level, required level or armor among equipped and bagged items that are
+that item or a copy of it, read from the item's own scaled template, or zero without one. `carried_item_scaling_level`
+returns the highest per-item level that native item scaling stored for such an item, or zero when none was stored.
 `loot_slot` with `item` also picks up a copy of that item.
 `creature_loot_quality_rate` requires `entry` (a creature loot id), fills that template `rolls` times (default 10000)
 for the actor and reports the percentage of fills holding an item of at least `quality` (default 3, rare).
@@ -711,11 +720,20 @@ reward eligibility and invokes native reward delivery. These actions do not test
 `action_button_packed` takes `button` and reads the complete action word, including its type.
 `server_packet_u32` takes `opcode` and optional zero-based `index`, and decodes a word from the last
 packet payload. It returns -1 when no such word was sent. These observe server state and packet contents.
+`server_packet_float` uses the same fields to decode a finite IEEE 754 float. With `from_end: true`,
+`index: 0` reads the last float and `index: 1` the preceding float, independent of a packed GUID's size.
+The recorded core packets include `SMSG_MOVE_KNOCK_BACK` (239), whose final two floats are horizontal
+speed and the negated vertical speed. These observations do not simulate client movement or keyboard input.
 Besides the Ascension extension opcodes (0x520 and above), the recorded packets include the learned, superseded
 and removed spell notices (299, 300 and 515) that the client prints to chat.
 
 `relog` takes `actor`, commits the character through the native save path, logs it out, and reloads it
 through the native character-login handler. It preserves saved character state and the scenario phase.
+Optional `race` seeds the saved character's race through `CHAR_UPD_CHAR_RACE` and updates the character cache
+before login, retaining saved pet data. This fixtures the post-service state; it does not submit a race/faction
+service request or perform that service's spell, quest, faction, language or appearance conversions.
+`race` reads the loaded unit's current race. `pet_native_display` reads the guardian's native display,
+which the pet save path persists and transformation removal restores.
 
 `login_hooks` takes `actor` and replays registered player-login hooks on the current character; it does not reconnect
 or reload the character from the database. Use it to exercise a repair against deliberately seeded fixture state.
@@ -793,6 +811,8 @@ It reads that creature's native spell hit modifier. `set_aura` accepts `owned_en
 of owned creature within 100 yards and the player's phase; it cannot also select `pet: true`.
 `owned_creature_attackable` requires the owning player, a present creature `entry` and a `target` unit.
 It reads whether that target can attack the summon through the native `IsValidAttackTarget` check.
+`owned_creature_victim` requires the owning player, a present creature `entry` and a `target` unit.
+It returns one while that unit is the summon's current victim.
 `pet_casting` requires the player's present native pet and reads its casting flag and active non-melee spell.
 Use it to observe channel completion before submitting another ordinary pet cast;
 aura expiry is a separate event.
@@ -824,18 +844,19 @@ check aura presence separately when zero is a valid effect amount. Permanent aur
 
 `scenarios/destiny-weaver-scaling.json` checks deferred scaling choices, armor debuffs, creature values
 updates after level changes, fractional damage accumulation, and ordinary damage with scaling off.
-It requires `DestinyWeaver.Enable=1`, `DestinyWeaver.LevelScaling=1`, `DestinyWeaver.Scaling.Offset=3`,
+It requires `DestinyWeaver.Enable=1`, `DestinyWeaver.LevelScaling=1`, `DestinyWeaver.Scaling.Offset=4`,
 and `CoA.QuestLevelScaling=1`. Spell 705798 supplies one base damage without critical hits;
 Faerie Fire (770) supplies a 5% armor reduction. Spell 705798 uses melee hit resolution, so the fixture
 sets melee hit and expertise as well as spell hit. Template 1501 has HealthModifier 0.93: the level-1
-fixture's real pool remains 40 HP while its level-57 view has 2,590 HP. Ten one-damage hits cannot remove
+fixture's real pool remains 40 HP while its level-55 view has 2,432 HP. Ten one-damage hits cannot remove
 a whole real HP; 67 remove one.
 
 `scenarios/skinning-dungeon-scaled-view.json` and `scenarios/skinning-open-world-level-scaling.json` need the
 same settings: the skinning requirement follows a view that lowers a dungeon creature, never one that lifts it.
 
 `scenarios/destiny-weaver-quest-fallback.json` requires a separate run with `DestinyWeaver.Enable=0`
-and `CoA.QuestLevelScaling=1`. Quest 7 must still scale to the player's level and award XP.
+and `CoA.QuestLevelScaling=1`. Quest 7 must still follow its QuestTemplateScaling.dbc row to level 20 and
+award XP.
 
 The `level_scaling_packet` action takes a player `actor` and `value` (0 or 1). It sends the existing
 four-byte request through the early packet hook on a worker, verifies that player state has not changed
@@ -847,6 +868,8 @@ It tests dispatch and deferral, not a real socket, packet delivery, or every pos
 the socketless session. They return zero until the corresponding field has been observed; they do not
 force updates or inspect client rendering. `lfg_dungeon_disabled` takes an LFGDungeons.dbc `dungeon` id and
 returns 1 when the `disables` table locks that dungeon's map and difficulty out of Dungeon Finder, otherwise 0.
+`lfg_state` takes a player `actor` and returns its native Dungeon Finder state (0 none, 1 role check, 2 queued,
+3 proposal, 4 vote kick, 5 in dungeon, 6 finished dungeon, 7 raid browser).
 `creature_query_rank` takes a player `actor` and creature `entry` and returns the rank of the
 last creature query response delivered to that session, or -1 before one arrives.
 `quest_level` and `quest_xp` take a player `actor` and `quest`

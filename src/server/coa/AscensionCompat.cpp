@@ -144,6 +144,7 @@ constexpr uint16 CMSG_CUSTOM_ASCENSION_POINT_SPEND_REQUEST = 0x0523;
 constexpr uint16 CMSG_EXTENSION_INITIALIZED = 0x0561;
 constexpr uint16 CMSG_CREATURE_QUERY_BULK = 0x061A;
 constexpr uint16 CMSG_ITEM_QUERY_BULK = 0x061B;
+constexpr uint16 CMSG_ITEM_STAT_QUERY = 0x06FF;
 constexpr uint16 SMSG_PATCH_APPEARANCES = 0x0692;
 constexpr uint16 SMSG_PATCH_ITEM_APPEARANCES = 0x0693;
 constexpr uint16 CMSG_APPLY_APPEARANCES = 0x0697;
@@ -210,11 +211,11 @@ static_assert(MAX_ITEM_QUERY_BULK_ENTRIES <= MAX_EXTENSION_REPLIES_PER_UPDATE);
 constexpr std::size_t POINT_SPEND_REQUEST_SIZE = sizeof(uint8) + sizeof(uint32);
 constexpr uint8 VANITY_CURRENCY_DONATION_POINTS = 2;
 
-constexpr std::array<uint16, 7> QUEUED_EXTENSION_OPCODES = {
+constexpr std::array<uint16, 8> QUEUED_EXTENSION_OPCODES = {
     CMSG_APPLY_APPEARANCES, CMSG_SET_CAN_SEE_APPEARANCES,
     CMSG_EXTENSION_INITIALIZED, CMSG_CUSTOM_ASCENSION_POINT_SPEND_REQUEST,
     CMSG_SAVE_APPEARANCE_OUTFIT, CMSG_DELETE_APPEARANCE_OUTFIT,
-    CMSG_INSPECT_CHARACTER_ADVANCEMENT};
+    CMSG_INSPECT_CHARACTER_ADVANCEMENT, CMSG_ITEM_STAT_QUERY};
 
 constexpr uint16 CMSG_QUERY_VENDORED_ITEM_RECOVERY = 0x05DE;
 constexpr uint16 CMSG_RECOVER_VENDORED_ITEM = 0x05E0;
@@ -238,6 +239,7 @@ constexpr ExtensionOpcodeIdentity EXTENSION_OPCODES[] = {
     {CMSG_EXTENSION_INITIALIZED, "CMSG_EXTENSION_INITIALIZED"},
     {0x05A1, "CMSG_CHALLENGE_QUERY_FAILURE"},
     {CMSG_ITEM_QUERY_BULK, "CMSG_ITEM_QUERY_BULK"},
+    {CMSG_ITEM_STAT_QUERY, "CMSG_ITEM_STAT_QUERY"},
     {0x0667, "CMSG_SET_LEVEL_SCALING"},
     {SMSG_PATCH_APPEARANCES, "SMSG_PATCH_APPEARANCES"},
     {SMSG_PATCH_ITEM_APPEARANCES, "SMSG_PATCH_ITEM_APPEARANCES"},
@@ -3208,7 +3210,11 @@ public:
     void OnPeriodicDamageTick(Unit* target, Unit* attacker, uint32 damage,
         SpellInfo const* spellInfo) const
     {
-        if (!target || !attacker || !damage || !spellInfo)
+        if (!target || !attacker || !spellInfo)
+            return;
+
+        Creature const* creature = target->ToCreature();
+        if (!damage && !(creature && creature->GetScriptName() == "npc_training_dummy"))
             return;
 
         Player* player = attacker->ToPlayer();
@@ -6209,6 +6215,9 @@ private:
         for (uint32 entry : ReadBulkQueryEntries(packet, MAX_ITEM_QUERY_BULK_ENTRIES))
           player->GetSession()->SendItemQuerySingleResponse(entry);
         break;
+      case CMSG_ITEM_STAT_QUERY:
+        ItemScaling::HandleStatQuery(player->GetSession(), packet);
+        break;
       case CMSG_CREATURE_QUERY_BULK:
         for (uint32 entry : ReadBulkQueryEntries(packet, MAX_CREATURE_QUERY_BULK_ENTRIES))
           SendCollectionCreatureQueryResponse(player->GetSession(), entry);
@@ -8992,6 +9001,43 @@ uint32 GetAscensionTalentRank(Player const* player, uint32 entryId)
         return 0;
 
     return AscensionClassService::KnownRank(player, *entry);
+}
+
+bool RestoreAscensionSpecializationSignature(Player* player)
+{
+    if (!player || player->GetLevel() < 10 || !IsAscensionCustomClass(player) ||
+        AscensionWildcard::IsWildcardHero(player))
+        return false;
+
+    uint32 const active = GetAscensionActiveSpecialization(player);
+    auto const specialization = std::find_if(AscensionCompatData::CoASpecializations.begin(),
+        AscensionCompatData::CoASpecializations.end(), [player, active](auto const& row)
+        {
+            return row.ClassId == player->getClass() && row.SpecId == active;
+        });
+    if (specialization == AscensionCompatData::CoASpecializations.end())
+        return false;
+
+    auto const* identity = FindAscensionTalentEntry(specialization->IdentityEntryId);
+    if (!identity || !AscensionClassService::KnownRank(player, *identity))
+        return false;
+
+    auto const* signature = FindAscensionTalentEntry(specialization->SignatureEntryId);
+    if (!signature)
+        return false;
+    if (AscensionClassService::KnownRank(player, *signature))
+        return true;
+
+    auto known = AscensionClassService::KnownTalentEntries(player);
+    known.push_back({signature->EntryId, 1});
+    UpdateEntriesRefusal refusal;
+    auto& service = AscensionClassService::Instance();
+    if (!service.ApplyKnownEntriesUpload(player, known, refusal, active))
+        return false;
+
+    service.SaveSlot(player);
+    service.SendCharacterAdvancementKnownEntries(player);
+    return true;
 }
 
 std::vector<AscensionCoATalentState::KnownEntry> GetAscensionKnownTalentEntries(Player const* player)

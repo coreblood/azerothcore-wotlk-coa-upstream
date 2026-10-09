@@ -34,6 +34,7 @@
 #include "InstanceSaveMgr.h"
 #include "InstanceScript.h"
 #include "Language.h"
+#include "LocalLevelScaling.h"
 #include "Log.h"
 #include "LootMgr.h"
 #include "MapMgr.h"
@@ -1120,6 +1121,8 @@ void WorldSession::HandleInspectOpcode(WorldPacket& recv_data)
 
     player->BuildEnchantmentsInfoData(&data);
     SendPacket(&data);
+
+    LocalLevelScaling::NotifyInspected(_player, player);
 }
 
 void WorldSession::HandleInspectHonorStatsOpcode(WorldPacket& recv_data)
@@ -1403,6 +1406,15 @@ void WorldSession::HandleQueryInstanceBindsOpcode(WorldPacket& /*recvData*/)
     for (InstanceSave const* save : saves)
         data << uint32(save->GetInstanceId()) << uint32(save->GetMapId()) << uint32(save->GetDifficulty());
     SendPacket(&data);
+
+    // The instance welcome of the last instance entered (HandleMoveWorldportAck), once; the client asks twice.
+    if (Map* map = _player->FindMap(); _player->CustomData.Erase("InstanceWelcomePending") && map && map->IsDungeon())
+    {
+        Difficulty diff = _player->GetDifficulty(map->IsRaid());
+        if (InstanceSaveMgr::GetResetDelayFor(map->GetId(), diff))
+            if (time_t timeReset = sInstanceSaveMgr->GetResetTimeFor(map->GetId(), diff))
+                _player->SendInstanceResetWarning(map->GetId(), diff, uint32(timeReset - GameTime::GetGameTime().count()), true);
+    }
 }
 
 // A Reset Instances list entry calls C_LootLockout.ResetInstanceDifficulty(map, difficulty), which sends this
