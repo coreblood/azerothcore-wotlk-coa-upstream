@@ -428,6 +428,7 @@ assert stable maximums and final levels when testing damage coefficients.
 | Action | Fields and behavior |
 | --- | --- |
 | `console` | `command`: execute one console command on the test server; capture its output. |
+| `game_event` | `event`, `active`: start or stop a game event whatever the realm date, so a holiday case passes on any day; `event start`/`event stop` refuse an event already in that state. The case restores each event's original state when it ends and runs exclusively, because events are process-global. |
 | `command` | `actor`, `command` beginning with `.`: execute with the player's normal permissions. Optional `rejected: true` instead requires the command to be refused (unknown, malformed or answered with an error). |
 | `whisper` | Player `actor`, `to`, `text`, optional `language` (Common by default): the client's whisper packet, sent as typed. |
 | `learn`, `unlearn` | `actor`, `spell`: configure learned spells/passives through player APIs. `unlearn` accepts `all_specs: true` to remove the fixture grant from every specialization before testing a lower weapon rank. |
@@ -921,8 +922,14 @@ all 19 map/mode pairs per tier and a real VanCleef killing blow, without a GM ac
 60 yards. Optional `min_level` and `max_level` filter their native levels; `min_home_distance` keeps creatures
 at least that many yards from their own home positions (2D), and `spell` those carrying that aura. This can
 observe movement and auras of native summons without creating or controlling them.
+`map_creature_count` requires a player and `entry`, and counts living spawned creatures of that entry loaded
+anywhere on the player's map, in any phase; a spawn whose grid is not loaded is not counted.
 `nearby_gameobject_state` takes `entry` and returns the state of the nearest such gameobject within 20 yards
 (0 open, 1 closed, 99 none).
+`nearby_gameobject_scale` takes `entry` and returns the object scale of the nearest such gameobject within
+20 yards (0 when none).
+`nearby_gameobject_at_client` takes `entry` and is 1 while the nearest such gameobject within 20 yards is in
+the player's client-visible set. Owners always see their own objects, so per-player visibility needs a world spawn.
 ## Evidence boundaries
 
 ### Optional character names
