@@ -3848,11 +3848,17 @@ void Player::CastRidingMount(uint32 spellId)
         return;
 
     CustomSpellValues values;
-    if (GetBaseSkillValue(SKILL_RIDING) < RIDING_SKILL_APPRENTICE)
-        for (SpellEffectInfo const& effect : spellInfo->GetEffects())
-            if (effect.ApplyAuraName == SPELL_AURA_MOD_INCREASE_MOUNTED_SPEED)
-                values.AddSpellMod(SpellValueMod(SPELLVALUE_BASE_POINT0 + effect.EffectIndex),
-                    NOVICE_RIDING_MOUNT_SPEED);
+    uint16 const riding = GetBaseSkillValue(SKILL_RIDING);
+    for (SpellEffectInfo const& effect : spellInfo->GetEffects())
+    {
+        int32 speed = 0;
+        if (effect.ApplyAuraName == SPELL_AURA_MOD_INCREASE_MOUNTED_SPEED)
+            speed = GetRidingGroundMountSpeed(riding);
+        else if (effect.ApplyAuraName == SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED)
+            speed = GetRidingFlightMountSpeed(riding);
+        if (speed)
+            values.AddSpellMod(SpellValueMod(SPELLVALUE_BASE_POINT0 + effect.EffectIndex), speed);
+    }
 
     CastCustomSpell(spellId, values, this, TRIGGERED_FULL_MASK);
 }
@@ -14531,7 +14537,18 @@ LootItem* Player::StoreLootItem(uint8 lootSlot, Loot* loot, InventoryResult& msg
     }
 
     ItemPosCountVec dest;
-    msg = CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item->itemid, item->count);
+    uint32 storedCount = item->count;
+    uint32 noSpaceForCount = 0;
+    msg = CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item->itemid, storedCount, &noSpaceForCount);
+    // A quest drop stack can exceed what the item's carry limit still allows; take what fits
+    // instead of refusing the whole stack while the quest still needs items.
+    if (msg == EQUIP_ERR_CANT_CARRY_MORE_OF_THIS && item->needs_quest && noSpaceForCount < storedCount)
+    {
+        storedCount -= noSpaceForCount;
+        dest.clear();
+        msg = CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, item->itemid, storedCount);
+    }
+
     if (msg == EQUIP_ERR_OK)
     {
         AllowedLooterSet looters = item->GetAllowedLooters();
@@ -14569,14 +14586,14 @@ LootItem* Player::StoreLootItem(uint8 lootSlot, Loot* loot, InventoryResult& msg
 
         --loot->unlootedCount;
 
-        SendNewItem(newitem, uint32(item->count), false, false, true);
+        SendNewItem(newitem, storedCount, false, false, true);
         UpdateLootAchievements(item, loot);
 
         // LootItem is being removed (looted) from the container, delete it from the DB.
         if (loot->containerGUID)
             sLootItemStorage->RemoveStoredLootItem(loot->containerGUID, item->itemid, item->count, loot, item->itemIndex);
 
-        sScriptMgr->OnPlayerLootItem(this, newitem, item->count, this->GetLootGUID());
+        sScriptMgr->OnPlayerLootItem(this, newitem, storedCount, this->GetLootGUID());
     }
     else
     {
