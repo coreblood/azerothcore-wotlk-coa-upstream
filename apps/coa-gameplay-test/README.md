@@ -355,7 +355,9 @@ jumps ahead to it, and the real clock runs the case in single mode with a fixed 
 ([realm-local time](../../docs/coa/verification.md#realm-local-time)). Every result records its start as
 `realm_local_start`. Optional `creature_scaling: true` enables CoA creature scaling with its built-in multipliers
 for that case, whatever the module config says, and restores the configured state when the case ends; the batch
-runs such a case exclusively because the setting is process-global.
+runs such a case exclusively because the setting is process-global. Optional
+`vanity_ownership: {"unlock_all": false, "starter_items": [98457]}` replaces `CoA.UnlockAllVanity` and
+`CoA.StarterVanityItems` for that case in the same way, and is likewise run exclusively.
 The [talent and item scenario](scenarios/talent-and-items.json) exercises talent learning, passive removal,
 equipping a shirt and consuming a healing potion. It does not measure the talent's damage coefficient.
 The [Shadowblast scenario](scenarios/shadowblast-shadow-rage.json) reproduces a Shadow Rage pet-targeting crash
@@ -477,6 +479,7 @@ assert stable maximums and final levels when testing damage coefficients.
 | `equip` | `actor`, `item`, `slot` (0..18 equipment, 19..22 bag slots): equip an owned item through the session handler. |
 | `use_item` | `actor`, `item`, `spell`, optional `target`, `target_item` (an owned item entry, sent as the item target instead of a unit) and `destination`: normal item-use handler. |
 | `use_nearby_gameobject` | `actor`, `entry`, optional `owner` (a player id): native use request for the single gameobject of that entry within 20 yards in the actor's phase; `owner` narrows the choice to the object that player owns, so one of several nearby objects can be clicked. |
+| `spell_click_nearby` | `actor`, `entry`: native `CMSG_SPELLCLICK` on the nearest living creature of that entry within 20 yards, as the client sends on right-clicking a spell-click creature. |
 | `use_gameobject` | `actor`, `entry`: native use request for the actor's single nearby owned gameobject. |
 | `summon_gameobject` | Player `actor`, `entry`, optional `distance` (yards in front, default 2) and `duration_s` (default 300; 0 keeps it until the actor logs out, and only an untimed summon counts as spawned for scripts that check it): summon a gameobject the actor owns; fails if the actor already owns one of that entry. |
 | `loot_gameobject` | Player `actor`, `entry`: open the loot of the actor's single owned chest as a successful open-lock cast does, so chest loot is generated for that player. Lock, key and skill checks are not exercised. |
@@ -985,6 +988,9 @@ the observer's native `CanSeeOrDetect` check; neither metric covers client rende
 `ascension_dungeon_difficulty_packet` sends the one-byte Ascension portrait-menu request through the
 real early receive hook and session queue; follow it with a wait before teleporting. The native
 `dungeon_difficulty_packet` remains available for Normal and Heroic. `nearby_creature_max_health`
-requires an entry and reads the nearest living matching creature within 60 yards. The
+requires an entry and reads the nearest living matching creature within 60 yards.
+`nearby_creature_sent_spellclick` reads that creature's NPC flags from the last values update the actor's client
+received: 1 with the spell-click flag, 0 without, -1 when no values update carried them (creation packets are not
+parsed). The
 `vanilla-dungeons-health` scenario uses real spawns to check video HP, explicitly inferred HP and
 unchanged Normal health. It does not establish the original Ascension scaling formula.

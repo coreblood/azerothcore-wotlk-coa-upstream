@@ -53,18 +53,23 @@ CoA.AutoCollectAppearances = 1
 CoA.EquippedGearLoot = 1
 CoA.EquippedGearLootChance = 5
 
-# Health and damage multipliers for regular-difficulty creatures, tuned to Ascension's combat logs.
+# Health and damage multipliers for regular-difficulty creatures, tuned to live Ascension readings.
 # Health is multiplied when a creature takes its level; damage applies to hits on players and their pets.
 # Heroic/Mythic, battlegrounds, arenas, pets, summons, totems, triggers, critters and training dummies are
 # not changed; raid creatures listed in coa_boss_flex keep their measured flex health.
 # MapHealth/MapDamage replace the context value per map as "mapId:multiplier".
+# Every value may also be a formula of the creature's level: numbers, level, + - * /, parentheses, min(a, b) and
+# max(a, b), e.g. CoA.CreatureScaling.World.Health = "1.17 + 0.013 * level". In MapHealth/MapDamage write a formula
+# without spaces ("43:0.3+0.08*level"), or separate the entries with ';' ("43: 0.3 + 0.08 * level; 36: 2.2").
+# World is fitted to live open-world creature health seen in videos of live Ascension (levels 1-59); world damage uses
+# the same formula. Dungeon and Raid keep their earlier estimates.
 # Without this section the server keeps these multipliers but leaves the feature disabled.
 CoA.CreatureScaling.Enable = 1
-CoA.CreatureScaling.World.Health = 2.5
+CoA.CreatureScaling.World.Health = "1.17 + 0.013 * level"
 CoA.CreatureScaling.Dungeon.Health = 2.5
 CoA.CreatureScaling.Raid.Health = 2.2
 CoA.CreatureScaling.MapHealth = "36:2.2 43:2.0 229:4.0 389:3.0 469:5.0"
-CoA.CreatureScaling.World.Damage = 2.0
+CoA.CreatureScaling.World.Damage = "1.17 + 0.013 * level"
 CoA.CreatureScaling.Dungeon.Damage = 1.5
 CoA.CreatureScaling.Raid.Damage = 1.0
 CoA.CreatureScaling.MapDamage = ""
@@ -88,6 +93,14 @@ CoA.AppearanceCatalogPerCategory = 500
 # Solo-server convenience: expose every static VanityCollection entry as account-owned.
 # Custom Ascension-only entries still require matching server item/spell templates to deliver.
 CoA.UnlockAllVanity = 1
+
+# Vanity items every account owns from its first login, as space-separated item ids. They are
+# recorded in the account's collection, so they stay owned with CoA.UnlockAllVanity = 0, and
+# CoA.LearnOwnedCompanions teaches their mount/companion spells. Ids missing from the client's
+# VanityCollection.dbc and consumable entries are skipped.
+# Example: "98457 134987" (Book of Ascension and Book of Artisans).
+# Default: ""
+CoA.StarterVanityItems = ""
 
 # If a vanity item has no server item template but its DBC row names a valid spell,
 # learn that spell directly when delivery is requested.
@@ -166,7 +179,8 @@ CoA.SendDisplayPatches = 1
 
 # Unpatched copy of the client's CreatureDisplayInfo.dbc, used to stream exactly
 # the rows the client is missing. Empty selects DataDir/dbc_clientset; when the
-# copy is unavailable, every display id at or above 652000 is streamed instead.
+# copy is unavailable, the server's own DataDir/dbc/CreatureDisplayInfo.dbc is used,
+# so only rows added through creaturedisplayinfo_dbc are streamed.
 CoA.ClientDbcDirectory = ""
 
 # Extension range derived from the installed client's opcode dispatch table.
@@ -606,3 +620,5 @@ XPHotspots.Enable = 0
 XPHotspots.MaxContinent = 2
 XPHotspots.ActiveCount = 3
 XPHotspots.BuffSpell = 993945
+# Brand: a short label (32 characters at most, no "|") the client shows with the hotspots; empty = none.
+XPHotspots.Brand = ""
