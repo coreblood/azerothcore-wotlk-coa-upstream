@@ -4687,6 +4687,22 @@ AllowTwoSide.Interaction.Arena = 0
 AllowTwoSide.Interaction.Auction = 0
 
 #
+#    AllowTwoSide.Interaction.Mail
+#        Description: Allow sending mails between factions.
+#        Default:     1 - (Enabled)
+#                     0 - (Disabled)
+
+AllowTwoSide.Interaction.Mail = 1
+
+#
+#    AllowTwoSide.Trade
+#        Description: Allow trading between factions.
+#        Default:     1 - (Enabled)
+#                     0 - (Disabled)
+
+AllowTwoSide.Trade = 1
+
+#
 #    AllowTwoSide.WhoList
 #        Description: Show characters of both factions in the who list and the friends list.
 #        Default:     1 - (Enabled)
@@ -4735,11 +4751,16 @@ RecruitAFriend.MaxDifference = 4
 
 #
 #    MaxRecruitAFriendBonusDistance
-#        Description: Max distance between character and and group to gain the Recruit-A-Friend
-#                     XP multiplier.
+#        Description: Max distance for Recruit-A-Friend level grants and reputation bonuses.
 #        Default:     100
 
 MaxRecruitAFriendBonusDistance = 100
+
+#    MaxRecruitAFriendXPDistance
+#        Description: Max distance between linked group members for the Recruit-A-Friend XP bonus.
+#        Default:     200
+
+MaxRecruitAFriendXPDistance = 200
 
 #
 ###################################################################################################
