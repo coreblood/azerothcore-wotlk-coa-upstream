@@ -20,7 +20,7 @@ import sys
 import tempfile
 import time
 
-from world_cache import WorldCache, input_fingerprint
+from world_cache import WorldCache, input_fingerprint, run_parallel
 
 ROOT = Path(__file__).resolve().parents[2]
 CREATE_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
@@ -30,7 +30,15 @@ LOCAL_HOSTS = {'127.0.0.1', 'localhost', '::1'}
 HOURS_PER_DAY = 24
 MINUTES_PER_HOUR = 60
 MINUTES_PER_DAY = HOURS_PER_DAY * MINUTES_PER_HOUR
-METRICS = {
+TIMELINE_METRICS = {'timeline_count', 'timeline_first_ms', 'timeline_interval_min_ms', 'timeline_interval_max_ms',
+                    'timeline_interval_median_ms'}
+TIMELINE_EVENTS = {'cast', 'aura_applied', 'aura_removed', 'death', 'enter_combat', 'evade', 'spawn', 'boss_state'}
+TIMELINE_FIELDS = {'event', 'source_entry', 'state', 'target_actors', 'exclude_target_actors'}
+ENCOUNTER_STATES = {'NOT_STARTED', 'IN_PROGRESS', 'FAIL', 'DONE', 'SPECIAL'}
+MAX_ENCOUNTER_RADIUS = 200
+RAID_ROLES = {'tank', 'healer', 'melee', 'ranged'}
+RAID_ROLE_FIELDS = {'rotation', 'heal_spell', 'taunt_spell', 'rotation_assist'}
+METRICS = TIMELINE_METRICS | {
     'item_random_property', 'item_suffix_factor', 'item_enchantment', 'item_guid', 'item_soulbound', 'item_duration',
     'mana_regen', 'mana_regen_interrupted', 'resting',
     'sent_mana_regen', 'sent_mana_regen_interrupted',
@@ -40,9 +48,11 @@ METRICS = {
     'melee_damage_count', 'melee_damage_total',
     'pet_power', 'pet_max_power', 'spell_energize_count', 'spell_energize_total',
     'xp', 'next_level_xp', 'skill_value', 'skill_maximum', 'lfg_dungeon_disabled', 'lfg_lock_status', 'lfg_state',
+    'lfg_need_allowed',
     'map_id',
     'in_arena', 'arena_team_members', 'arena_team_season_games', 'arena_team_season_wins',
-    'map_difficulty', 'nearby_creature_template', 'nearby_creature_max_health', 'nearby_creature_sent_spellclick',
+    'map_difficulty', 'nearby_creature_template', 'nearby_creature_max_health', 'nearby_creature_health_pct',
+    'nearby_creature_sent_spellclick',
     'spawn_respawn_remaining',
     'loot_gear_item_level',
     'position_x', 'position_y', 'position_z',
@@ -90,6 +100,7 @@ METRICS = {
     'who_count', 'who_class', 'player_name', 'name_lookup', 'loot_count', 'loot_entry', 'loot_received',
     'loot_offered_item_count', 'loot_gold', 'loot_bloodforged', 'loot_required_level', 'loot_item_level', 'loot_base_entry', 'loot_item_armor',
     'carried_item_level', 'carried_item_required_level', 'carried_item_armor', 'carried_item_scaling_level',
+    'carried_item_stat',
     'nearby_gameobject_count', 'nearby_gameobject_quest_active', 'nearby_gameobject_state', 'nearby_gameobject_scale',
     'nearby_creature_count', 'map_creature_count', 'nearby_gameobject_at_client', 'voidportal_group',
     'carried_money',
@@ -107,10 +118,12 @@ METRICS = {
     'spell_modifier', 'spell_cast_time_ms', 'client_cast_time_ms', 'client_attributes', 'client_spell_targets', 'spell_max_range', 'spell_max_stacks', 'spell_healing_done',
     'aura_crit_chance', 'aura_script_value', 'melee_hit_chance', 'spell_hit_chance', 'spell_power',
     'spell_done_crit_chance', 'spell_taken_crit_chance', 'spell_done_crit_chance_scripted', 'ranged_taken_crit_chance',
-    'melee_spell_damage_done', 'script_melee_damage_taken',
+    'melee_spell_damage_done', 'melee_spell_damage_done_scripted', 'script_melee_damage_taken',
+    'script_melee_damage_dealt',
     'script_spell_damage_taken', 'script_periodic_damage_taken', 'script_heal_received', 'spell_effect_value',
     'block_chance', 'block_value', 'critical_block_chance', 'spell_critical_damage', 'armor_reduced_damage',
     'aoe_damage_taken', 'reputation_gain', 'spell_immune', 'spell_effect_immune', 'melee_attack_count',
+    'melee_attacks_taken',
     'spell_damage_count', 'spell_damage_total', 'spell_uses_armor',
     'spell_heal_count', 'spell_heal_total', 'spell_effective_heal_total',
     'equipped_item',
@@ -140,10 +153,12 @@ PLAYER_STAT_METRICS = {
     'spell_family_flags',
     'melee_hit_chance', 'spell_power', 'spell_done_crit_chance',
     'spell_taken_crit_chance', 'spell_done_crit_chance_scripted', 'melee_spell_damage_done',
-    'script_melee_damage_taken', 'script_spell_damage_taken', 'script_periodic_damage_taken',
-    'script_heal_received', 'spell_effect_value',
+    'melee_spell_damage_done_scripted',
+    'script_melee_damage_taken', 'script_melee_damage_dealt', 'script_spell_damage_taken',
+    'script_periodic_damage_taken', 'script_heal_received', 'spell_effect_value',
     'block_chance', 'block_value', 'critical_block_chance', 'spell_critical_damage', 'armor_reduced_damage',
     'aoe_damage_taken', 'reputation_gain', 'spell_immune', 'spell_effect_immune', 'melee_attack_count',
+    'melee_attacks_taken',
     'spell_damage_count', 'spell_damage_total', 'spell_uses_armor',
     'spell_heal_count', 'spell_heal_total', 'spell_effective_heal_total',
     'equipped_item',
@@ -160,7 +175,7 @@ METRIC_FIELDS = {'actor', 'metric', 'spell', 'power', 'caster', 'effect', 'item'
                  'phase_mask', 'trigger_spell', 'trials', 'incoming', 'heal', 'quality',
                  'row', 'offset', 'skip_strings', 'from_end', 'x', 'y', 'min_required_level', 'max_required_level',
                  'flat_coefficient_modifier', 'dominant_stat', 'off_stat', 'spells',
-                 'min_level', 'max_level', 'min_home_distance', 'spawn'}
+                 'min_level', 'max_level', 'min_home_distance', 'spawn'} | TIMELINE_FIELDS
 ACTIONS = {
     'stop_attack': ({'actor'}, {'actor'}),
     'set_moving': ({'actor', 'enabled'}, {'actor', 'enabled', 'flag'}),
@@ -201,6 +216,7 @@ ACTIONS = {
     'lfg_accept': ({'actor'}, {'actor'}),
     'lfg_final_credit': ({'actor'}, {'actor'}),
     'encounter_credit': ({'actor', 'entry'}, {'actor', 'entry'}),
+    'encounter_start': ({'actor', 'boss_entry'}, {'actor', 'boss_entry', 'radius'}),
     'leave_group': ({'actor'}, {'actor'}),
     'die': ({'actor'}, {'actor', 'revived'}),
     'release_spirit': ({'actor'}, {'actor'}),
@@ -259,6 +275,7 @@ ACTIONS = {
     'set_xp_enabled': ({'actor', 'enabled'}, {'actor', 'enabled'}),
     'set_level': ({'actor', 'value'}, {'actor', 'value'}),
     'set_health': ({'actor', 'value'}, {'actor', 'value', 'pet', 'maximum'}),
+    'set_health_pct': ({'actor', 'pct'}, {'actor', 'pct', 'entry', 'target'}),
     'reset_cooldown': ({'actor', 'spell'}, {'actor', 'spell'}),
     'restore_charges': ({'actor', 'spell'}, {'actor', 'spell'}),
     'set_power': ({'actor', 'value'}, {'actor', 'value', 'power', 'pet'}),
@@ -302,13 +319,60 @@ def read_json(path):
     return json.loads(Path(path).read_text(encoding='utf-8-sig'), object_pairs_hook=unique_object)
 
 
+def validate_timeline_step(step, where, encounter_started, actor_ids):
+    require(encounter_started, f'{where}: timeline metrics need an earlier encounter_start')
+    event = step.get('event')
+    require(isinstance(event, str) and event in TIMELINE_EVENTS, f'{where}: timeline metric needs a known event')
+    for field in ('spell', 'source_entry'):
+        if field in step:
+            number(step[field], f'{where}.{field}', 1, 2**32 - 1, True)
+    if 'state' in step:
+        state = step['state']
+        require(event == 'boss_state' and isinstance(state, str) and state in ENCOUNTER_STATES,
+                f'{where}: state needs the boss_state event and a known encounter state')
+    for field in ('target_actors', 'exclude_target_actors'):
+        if field in step:
+            actors = step[field]
+            require(isinstance(actors, list) and actors
+                    and all(isinstance(actor, str) and actor in actor_ids for actor in actors)
+                    and len(set(actors)) == len(actors), f'{where}: {field} must list distinct known actors')
+
+
+MAX_PLAYERS = {1: 8, 2: 25}
+MAX_TIMEOUT_MS = {1: 600000, 2: 1200000}
+
+
+def validate_raid_role(player):
+    if 'role' not in player:
+        require(not RAID_ROLE_FIELDS & player.keys(), f'{sorted(RAID_ROLE_FIELDS)} need a player role')
+        return
+    role = player['role']
+    require(isinstance(role, str) and role in RAID_ROLES, f'role must be one of {sorted(RAID_ROLES)}')
+    require(type(player.get('rotation_assist', False)) is bool, 'rotation_assist must be boolean')
+    for field in ('heal_spell', 'taunt_spell'):
+        if field in player:
+            number(player[field], field, 1, 2**32 - 1, True)
+    require(('heal_spell' in player) == (role == 'healer'), 'heal_spell is required for a healer and only for one')
+    require(role == 'tank' or 'taunt_spell' not in player, 'taunt_spell is only for a tank')
+    require(role != 'healer' or 'rotation' not in player, 'A healer casts heal_spell, not a rotation')
+    require(role != 'ranged' or 'rotation' in player, 'A ranged role needs a rotation')
+    if 'rotation' not in player:
+        return
+    rotation = player['rotation']
+    require(isinstance(rotation, list) and rotation, 'rotation must be a non-empty list of spell ids')
+    for spell in rotation:
+        number(spell, 'rotation', 1, 2**32 - 1, True)
+    require(len(set(rotation)) == len(rotation), 'rotation must not repeat a spell')
+
+
 def validate(scenario):
     keys(scenario, {'schema', 'name', 'players', 'steps'},
          {'schema', 'name', 'players', 'creatures', 'steps', 'timeout_ms', 'location', 'contract', 'hour',
           'creature_scaling', 'vanity_ownership', 'two_side'}, 'scenario')
-    require(type(scenario['schema']) is int and scenario['schema'] == 1, 'Unsupported scenario schema')
+    schema = scenario['schema']
+    require(type(schema) is int and schema in MAX_PLAYERS, 'Unsupported scenario schema')
     require(isinstance(scenario['name'], str) and scenario['name'].strip(), 'Scenario needs a name')
-    number(scenario.get('timeout_ms', 90000), 'timeout_ms', 1, 600000, True)
+    number(scenario.get('timeout_ms', 90000), 'timeout_ms', 1, MAX_TIMEOUT_MS[schema], True)
     if 'hour' in scenario:
         number(scenario['hour'], 'hour', 0, HOURS_PER_DAY - 1, True)
     require(type(scenario.get('creature_scaling', False)) is bool, 'creature_scaling must be boolean')
@@ -327,7 +391,8 @@ def validate(scenario):
             require(type(value) is bool, f'two_side.{name} must be boolean')
     players = scenario['players']
     creatures = scenario.get('creatures', [])
-    require(isinstance(players, list) and 1 <= len(players) <= 8, 'Expected 1..8 players')
+    require(isinstance(players, list) and 1 <= len(players) <= MAX_PLAYERS[schema],
+            f'Expected 1..{MAX_PLAYERS[schema]} players')
     require(isinstance(creatures, list) and len(creatures) <= 8, 'Expected at most eight creatures')
     player_ids = set()
     actor_ids = set()
@@ -335,7 +400,8 @@ def validate(scenario):
         keys(player, {'id', 'race', 'class'},
              {'id', 'race', 'class', 'level', 'bot', 'spell_hit_rating', 'spell_crit_rating',
               'melee_crit_rating', 'ranged_crit_rating', 'ranged_hit_rating', 'melee_hit_rating',
-              'expertise_rating', 'allow_regeneration', 'name', 'expansion', 'ascension_client', 'account_of'}, 'player')
+              'expertise_rating', 'allow_regeneration', 'name', 'expansion', 'ascension_client', 'account_of',
+              'role', 'rotation', 'heal_spell', 'taunt_spell', 'rotation_assist'}, 'player')
         identity = player['id']
         require(isinstance(identity, str) and ACTOR_ID.fullmatch(identity), 'Invalid player id')
         require(identity not in actor_ids, 'Duplicate actor id')
@@ -361,6 +427,7 @@ def validate(scenario):
         number(player.get('melee_hit_rating', 0), 'melee_hit_rating', 0, 100000, True)
         number(player.get('expertise_rating', 0), 'expertise_rating', 0, 100000, True)
         require(type(player.get('allow_regeneration', True)) is bool, 'allow_regeneration must be boolean')
+        validate_raid_role(player)
     for creature in creatures:
         keys(creature, {'id', 'owner', 'entry'},
              {'id', 'owner', 'entry', 'distance', 'faction', 'level', 'health', 'reaction', 'spell_hit_bonus',
@@ -390,6 +457,7 @@ def validate(scenario):
     require(isinstance(steps, list) and 1 <= len(steps) <= 10000, 'Expected 1..10000 steps')
     snapshots = {}
     assertions = 0
+    encounter_started = False
     for index, step in enumerate(steps):
         where = f'step {index}'
         require(isinstance(step, dict) and step.get('action') in ACTIONS, f'{where}: unknown action')
@@ -516,6 +584,13 @@ def validate(scenario):
             number(step['dungeon'], f'{where}.dungeon', 1, 2**24 - 1, True)
         if action == 'encounter_credit':
             number(step['entry'], f'{where}.entry', 1, 2**32 - 1, True)
+        if action == 'encounter_start':
+            number(step['boss_entry'], f'{where}.boss_entry', 1, 2**32 - 1, True)
+            if 'radius' in step:
+                number(step['radius'], f'{where}.radius', 0, MAX_ENCOUNTER_RADIUS)
+                require(step['radius'] > 0, f'{where}: radius must be positive')
+            require(not encounter_started, f'{where}: a scenario allows only one encounter_start')
+            encounter_started = True
         if action == 'lfg_join':
             require(type(step['dungeons']) is list and 0 < len(step['dungeons']) <= 50,
                     f'{where}: dungeons must list 1-50 LFGDungeons ids')
@@ -637,12 +712,19 @@ def validate(scenario):
                     number(value, f'{where}.fields[{index}]', 0, maximum, True)
         if 'value' in step:
             number(step['value'], f'{where}.value', 1 if action == 'set_health' else 0, 2**31 - 1, True)
+        if action == 'set_health_pct':
+            require(('entry' in step) != ('target' in step), f'{where}: needs exactly one of entry or target')
+            number(step['pct'], f'{where}.pct', 1, 99, True)
         if action == 'set_health' and 'maximum' in step:
             require(step['actor'] in player_ids, f'{where}: maximum health fixture needs a player or their pet')
             number(step['maximum'], f'{where}.maximum', 1, 2**31 - 1, True)
             require(step['value'] <= step['maximum'], f'{where}: health exceeds fixture maximum')
         if action in {'snapshot', 'assert'}:
             metric = step['metric']
+            if metric in TIMELINE_METRICS:
+                validate_timeline_step(step, where, encounter_started, actor_ids)
+            else:
+                require(not TIMELINE_FIELDS & step.keys(), f'{where}: event fields only apply to timeline metrics')
             if 'creator_only' in step:
                 require(metric == 'owned_creature_count', f'{where}: creator_only needs owned_creature_count')
                 require(type(step['creator_only']) is bool, f'{where}: creator_only must be boolean')
@@ -687,10 +769,11 @@ def validate(scenario):
             if metric == 'creature_query_rank':
                 require(step['actor'] in player_ids, f'{where}: creature query metric needs a player')
                 number(step.get('entry'), f'{where}.entry', 1, 2**31 - 1, True)
-            if metric in {'map_id', 'map_difficulty', 'nearby_creature_template',
-                          'nearby_creature_max_health', 'nearby_creature_sent_spellclick', 'loot_gear_item_level'}:
+            if metric in {'map_id', 'map_difficulty', 'nearby_creature_template', 'nearby_creature_max_health',
+                          'nearby_creature_health_pct', 'nearby_creature_sent_spellclick', 'loot_gear_item_level'}:
                 require(step['actor'] in player_ids, f'{where}: dungeon/loot metric needs a player')
-            if metric in {'nearby_creature_template', 'nearby_creature_max_health', 'nearby_creature_sent_spellclick'}:
+            if metric in {'nearby_creature_template', 'nearby_creature_max_health', 'nearby_creature_health_pct',
+                          'nearby_creature_sent_spellclick'}:
                 number(step.get('entry'), f'{where}.entry', 1, 2**32 - 1, True)
             if metric == 'spawn_respawn_remaining':
                 require(step['actor'] in player_ids, f'{where}: spawn respawn metric needs a player')
@@ -716,6 +799,9 @@ def validate(scenario):
                         f'{where}: creature level bounds are reversed')
             if metric == 'lfg_state':
                 require(step['actor'] in player_ids, f'{where}: LFG state metric needs a player')
+            if metric == 'lfg_need_allowed':
+                require(step['actor'] in player_ids, f'{where}: LFG Need metric needs a player')
+                number(step.get('item'), f'{where}.item', 1, 2**32 - 1, True)
             if metric == 'lfg_lock_status':
                 require(step['actor'] in player_ids, f'{where}: LFG lock metric needs a player')
                 number(step.get('dungeon'), f'{where}.dungeon', 1, 2**24 - 1, True)
@@ -742,7 +828,8 @@ def validate(scenario):
                     'spell_family_flags',
                     'spell_taken_crit_chance',
                     'spell_done_crit_chance_scripted',
-                    'melee_spell_damage_done', 'script_spell_damage_taken', 'script_periodic_damage_taken',
+                    'melee_spell_damage_done', 'melee_spell_damage_done_scripted',
+                    'script_spell_damage_taken', 'script_periodic_damage_taken',
                     'script_heal_received', 'spell_effect_value', 'spell_critical_damage', 'armor_reduced_damage',
                     'spell_immune', 'spell_effect_immune', 'spell_damage_count', 'spell_damage_total',
                     'spell_uses_armor', 'pet_aura_amount', 'pet_aura_amplitude_ms', 'spell_heal_count', 'spell_heal_total',
@@ -778,6 +865,7 @@ def validate(scenario):
             if metric in {'spell_damage_done', 'melee_damage_done', 'spell_damage_taken', 'melee_damage_taken',
                           'spell_healing_done', 'spell_healing_taken', 'spell_done_crit_chance',
                           'spell_taken_crit_chance', 'spell_done_crit_chance_scripted', 'melee_spell_damage_done',
+                          'melee_spell_damage_done_scripted',
                           'spell_critical_damage', 'armor_reduced_damage', 'spell_immune', 'spell_effect_immune',
                           'distance_2d', 'can_detect'} \
                     or metric.startswith('script_'):
@@ -828,8 +916,10 @@ def validate(scenario):
             if 'school' in step and metric == 'spell_crit_chance':
                 number(step['school'], f'{where}.school', 0, 6, True)
             if metric in {'item_count', 'carried_item_level', 'carried_item_required_level', 'carried_item_armor',
-                          'carried_item_scaling_level', 'loot_offered_item_count'}:
+                          'carried_item_scaling_level', 'carried_item_stat', 'loot_offered_item_count'}:
                 require('item' in step, f'{where}: metric needs item')
+            if metric == 'carried_item_stat':
+                number(step.get('stat'), f'{where}.stat', 0, 255, True)
             if metric in {'item_random_property', 'item_suffix_factor', 'item_enchantment',
                           'item_guid', 'item_soulbound', 'item_duration'}:
                 require(step['actor'] in player_ids, f'{where}: item observation needs a player')
@@ -988,7 +1078,7 @@ def validate(scenario):
                           'loot_offered_item_count', 'quest_rewarded', 'has_achievement',
                           'loot_base_entry', 'loot_item_armor',
                           'carried_item_level', 'carried_item_required_level', 'carried_item_armor',
-                          'carried_item_scaling_level',
+                          'carried_item_scaling_level', 'carried_item_stat',
                           'has_title',
                           'quest_status', 'quest_takeable', 'quest_objective_count', 'dialog_status',
                           'ball_offer_count', 'ball_offers_quest',
@@ -1147,16 +1237,46 @@ def database_credentials(connections, path):
     return result
 
 
+DEFAULT_COPY_WORKERS = min(8, os.cpu_count() or 1)
+MAX_COPY_WORKERS = 32
+COPY_TIMEOUT = 1800
+DROP_TIMEOUT = 600
+ERROR_LIMIT = 500
+COPY_SESSION = ("SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO', foreign_key_checks = 0, "
+                "transaction_isolation = 'READ-COMMITTED';")
+COPY_OBSTACLES = ('views', 'triggers', 'routines', 'events', 'statement-based binary logging')
+BATCH_ESCAPES = {'n': '\n', 't': '\t', '0': '\0', '\\': '\\'}
+
+
+def copy_worker_count(value):
+    number = int(value)
+    if not 1 <= number <= MAX_COPY_WORKERS:
+        raise argparse.ArgumentTypeError(f'must be an integer from 1 to {MAX_COPY_WORKERS}')
+    return number
+
+
+def batch_unescape(text):
+    return re.sub(r'\\(.)', lambda match: BATCH_ESCAPES.get(match[1], match[0]), text)
+
+
+def quote_name(name):
+    return '`' + name.replace('`', '``') + '`'
+
+
 class Databases:
-    def __init__(self, mysql, dump, directory, connections, run_id):
+    def __init__(self, mysql, dump, directory, connections, run_id, copy_workers=1):
         require(re.fullmatch(r'[0-9a-f]{12}', run_id), 'Invalid run id')
+        require(type(copy_workers) is int and 1 <= copy_workers <= MAX_COPY_WORKERS,
+                f'Database copy workers must be from 1 to {MAX_COPY_WORKERS}')
         self.mysql = str(mysql)
         self.dump = str(dump)
         self.directory = directory
         self.connections = connections
+        self.copy_workers = copy_workers
         self.names = {role: f'coa_test_{run_id}_{role}' for role in connections}
         self.created = []
         self.option_files = {}
+        self.inventories = {}
         try:
             for role, connection in connections.items():
                 require(self.names[role] != connection.database, 'Source and test database must differ')
@@ -1181,13 +1301,89 @@ class Databases:
     def sql(self, role, statement, timeout=60):
         result = subprocess.run([self.mysql, f'--defaults-extra-file={self.option_files[role]}',
                                  '--batch', '--skip-column-names'], input=statement, text=True,
-                                capture_output=True, timeout=timeout, creationflags=CREATE_FLAGS)
+                                encoding='utf-8', capture_output=True, timeout=timeout, creationflags=CREATE_FLAGS)
         if result.returncode:
             detail = self.redact(result.stderr)
             raise ValueError(f'MySQL operation failed for {role}: {detail or result.returncode}')
         return result.stdout.strip()
 
+    def drop(self, role, name):
+        self.sql(role, f'DROP DATABASE `{name}`;', timeout=DROP_TIMEOUT)
+
+    def inventory(self, role):
+        if role in self.inventories:
+            return self.inventories[role]
+        source = self.connections[role].database
+        counts = self.sql(role, 'SELECT ' + ', '.join(
+            f"(SELECT COUNT(*) FROM information_schema.{view} WHERE {column}='{source}')"
+            for view, column in (('VIEWS', 'TABLE_SCHEMA'), ('TRIGGERS', 'TRIGGER_SCHEMA'),
+                                 ('ROUTINES', 'ROUTINE_SCHEMA'), ('EVENTS', 'EVENT_SCHEMA')))
+            + ", @@log_bin AND @@binlog_format = 'STATEMENT';").split('\t')
+        require(len(counts) == len(COPY_OBSTACLES) and all(count.isdecimal() for count in counts),
+                f'Unreadable copy prerequisites for {role}')
+        inventory = {'obstacles': [name for name, count in zip(COPY_OBSTACLES, counts) if int(count)], 'tables': {}}
+        if not inventory['obstacles']:
+            rows = self.sql(role, 'SELECT TABLE_NAME, TABLE_TYPE, COALESCE(DATA_LENGTH, 0) + COALESCE(INDEX_LENGTH, 0) '
+                            f"FROM information_schema.TABLES WHERE TABLE_SCHEMA='{source}';").splitlines()
+            for row in rows:
+                table, kind, size = row.split('\t')
+                if kind == 'BASE TABLE':
+                    inventory['tables'][table] = int(size)
+        self.inventories[role] = inventory
+        return inventory
+
+    def columns(self, role):
+        source = self.connections[role].database
+        result = {}
+        for row in self.sql(role, 'SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS '
+                            f"WHERE TABLE_SCHEMA='{source}' AND GENERATION_EXPRESSION = '' "
+                            'ORDER BY TABLE_NAME, ORDINAL_POSITION;').splitlines():
+            table, column = row.split('\t')
+            result.setdefault(table, []).append(quote_name(column))
+        return result
+
+    def definitions(self, role, tables):
+        source = quote_name(self.connections[role].database)
+        statement = '\n'.join(f'SHOW CREATE TABLE {source}.{quote_name(table)};' for table in tables)
+        for _ in range(3):
+            rows = dict(row.split('\t', 1) for row in self.sql(role, statement, timeout=300).splitlines())
+            if rows.keys() == set(tables):
+                return {table: batch_unescape(definition) for table, definition in rows.items()}
+        raise ValueError(f'Incomplete table definitions for {role}')
+
     def copy(self, role, schema_only=False, tables=(), where=None):
+        inventory = self.inventory(role)
+        source = self.connections[role].database
+        if inventory['obstacles']:
+            print(f"Copying {role} with mysqldump: {source} has {', '.join(inventory['obstacles'])}.", flush=True)
+            self.dump_copy(role, schema_only, tables, where)
+            return
+        missing = [table for table in tables if table not in inventory['tables']]
+        require(not missing, f"Missing source table for {role}: {', '.join(missing)}")
+        selected = sorted(tables or inventory['tables'], key=lambda table: (-inventory['tables'][table], table))
+        definitions = self.definitions(role, selected) if schema_only or not tables else {}
+        columns = {} if schema_only else self.columns(role)
+        target = quote_name(self.names[role])
+        scripts = []
+        for table in selected:
+            parts = [COPY_SESSION]
+            if definitions:
+                parts += [f'USE {target};', definitions[table] + ';']
+            if not schema_only:
+                names = ', '.join(columns[table])
+                condition = f' WHERE {where}' if where else ''
+                parts += [f'USE {quote_name(source)};', f'INSERT INTO {target}.{quote_name(table)} ({names}) '
+                                                        f'SELECT {names} FROM {quote_name(table)}{condition};']
+            scripts.append('\n'.join(parts))
+        self.run_copies(role, scripts)
+
+    def run_copies(self, role, scripts):
+        try:
+            run_parallel(lambda script: self.sql(role, script, timeout=COPY_TIMEOUT), scripts, self.copy_workers)
+        except Exception as error:
+            raise ValueError(f'Database copy failed for {role}: {error}') from error
+
+    def dump_copy(self, role, schema_only, tables, where):
         connection = self.connections[role]
         arguments = [self.dump, f'--defaults-extra-file={self.option_files[role]}',
                      '--single-transaction', '--skip-lock-tables', '--no-tablespaces', '--skip-add-locks',
@@ -1240,9 +1436,9 @@ class Databases:
         failures = []
         for role in reversed(self.created):
             try:
-                self.sql(role, f'DROP DATABASE `{self.names[role]}`;')
-            except (ValueError, subprocess.SubprocessError):
-                failures.append(self.names[role])
+                self.drop(role, self.names[role])
+            except (ValueError, subprocess.SubprocessError) as error:
+                failures.append(cleanup_failure(self.names[role], error))
         return failures
 
     def remove_credentials(self):
@@ -1320,14 +1516,25 @@ def prepare_databases(database, cache, refresh=False):
     database.prepare(roles=('auth', 'characters') if cache else ('auth', 'characters', 'world'))
 
 
+def failure_text(error):
+    if isinstance(error, subprocess.TimeoutExpired):
+        return f'timed out after {error.timeout:g} s'
+    return str(error).strip()[-ERROR_LIMIT:]
+
+
+def cleanup_failure(schema, error):
+    return {'schema': schema, 'error': error if isinstance(error, str) else failure_text(error)}
+
+
 def release_databases(database, cache, server_still_running, summary):
-    failures = list(database.names.values()) if server_still_running else database.cleanup()
+    failures = ([cleanup_failure(name, 'worldserver still running') for name in database.names.values()]
+                if server_still_running else database.cleanup())
     if cache:
         try:
             cache.finish(server_still_running=server_still_running)
         except (ValueError, OSError, subprocess.SubprocessError, KeyError) as error:
-            summary['cache_cleanup_error'] = str(error)
-            failures.append(database.names['world'])
+            summary['cache_cleanup_error'] = failure_text(error)
+            failures.append(cleanup_failure(database.names['world'], error))
     if failures:
         summary.update(status='failed', cleanup_failed=failures)
     return failures
@@ -1506,7 +1713,7 @@ def execute(args, scenario):
     summary = {'schema': 1, 'run_id': run_id, 'scenario': scenario['name'], 'status': 'failed',
                'binary_sha256': sha256(binary), 'scenario_sha256': sha256(scenario_path),
                'binary': str(binary)}
-    database = Databases(mysql, dump, credentials_dir, connections, run_id)
+    database = Databases(mysql, dump, credentials_dir, connections, run_id, args.copy_workers)
     summary['databases'] = database.names
     try:
         module_source = args.modules_config_dir or source_config.parent / 'modules'
@@ -1587,6 +1794,9 @@ def add_run_arguments(run):
     mode.add_argument('--refresh-world', action='store_true', help='Replace the owned world cache before this run')
     run.add_argument('--world-cache-dir', type=Path, default=ROOT / '.cache/coa-gameplay-tests/world-cache',
                      help='Local cache metadata/lease directory; database ownership is verified separately')
+    run.add_argument('--copy-workers', type=copy_worker_count, default=DEFAULT_COPY_WORKERS,
+                     help='MySQL connections that copy test schemas in parallel and, capped at 8, checksum the world '
+                          f'(1-{MAX_COPY_WORKERS}, default {DEFAULT_COPY_WORKERS}: min(8, CPU count))')
 
 
 def main(argv=None):
